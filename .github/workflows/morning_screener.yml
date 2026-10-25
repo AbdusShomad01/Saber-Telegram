@@ -1,8 +1,8 @@
-name: 🌅 Morning Screener (00:01 WIB)
+name: 🌅 Morning Screener (00:01 WIB Senin-Jumat)
 
 on:
   schedule:
-    # 00:01 WIB = 17:01 UTC hari sebelumnya (Senin-Jumat WIB -> Minggu-Kamis UTC)
+    # 00:01 WIB Senin-Jumat = 17:01 UTC Minggu-Kamis (0=Minggu, 1=Senin, ..., 4=Kamis)
     - cron: '1 17 * * 0-4'
   workflow_dispatch: # Memungkinkan tombol 'Run workflow' manual kapan saja
 
