@@ -1,0 +1,45 @@
+# === Core ===
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.1
+python-dotenv==1.0.1
+
+# === Database ===
+sqlalchemy==2.0.36
+asyncpg==0.30.0
+psycopg2-binary==2.9.10
+alembic==1.14.1
+
+# === Data & Analysis ===
+pandas==2.2.3
+numpy==1.26.4
+yfinance==0.2.48
+
+# === Telegram ===
+python-telegram-bot==21.9
+
+# === Scheduler ===
+apscheduler==3.10.4
+
+# === HTTP Client ===
+httpx==0.28.1
+aiohttp==3.11.11
+
+# === LLM ===
+anthropic==0.42.0
+google-genai>=1.0.0
+
+# === Image ===
+Pillow>=10.0.0
+
+# === Testing ===
+pytest==8.3.4
+pytest-asyncio==0.25.0
+pytest-cov==6.0.0
+
+# === Security & Utils ===
+slowapi==0.1.9
+python-multipart==0.0.20
+loguru==0.7.3
+pytz==2024.2

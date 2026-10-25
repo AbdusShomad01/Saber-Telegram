@@ -1,0 +1,55 @@
+name: 🌅 Morning Screener (00:01 WIB)
+
+on:
+  schedule:
+    # 00:01 WIB = 17:01 UTC hari sebelumnya (Senin-Jumat WIB -> Minggu-Kamis UTC)
+    - cron: '1 17 * * 0-4'
+  workflow_dispatch: # Memungkinkan tombol 'Run workflow' manual kapan saja
+
+permissions:
+  contents: write
+
+jobs:
+  morning-screener:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 📦 Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: ⚙️ Setup Environment Secrets
+        run: |
+          if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ]; then
+            echo "TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}" >> .env
+            echo "TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}" >> .env
+            echo "TELEGRAM_MESSAGE_THREAD_ID=${{ secrets.TELEGRAM_MESSAGE_THREAD_ID }}" >> .env
+            echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" >> .env
+            echo "LLM_PROVIDER=gemini" >> .env
+            echo "GOOGLE_SHEET_WEBHOOK_URL=${{ secrets.GOOGLE_SHEET_WEBHOOK_URL }}" >> .env
+            echo "GOOGLE_SHEET_VIEW_URL=${{ secrets.GOOGLE_SHEET_VIEW_URL }}" >> .env
+            echo "DAY_TRADE_MODE=true" >> .env
+            echo "CHART_INTERVAL=1d" >> .env
+            echo "DATA_PROVIDER=yfinance" >> .env
+          fi
+
+      - name: 🚀 Run Morning Scan
+        run: python run_morning_now.py
+
+      - name: 💾 Commit & Push Database Changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add idx_signal_bot.db || true
+          git commit -m "Auto-update database from Morning Screener [skip ci]" || true
+          git push || true

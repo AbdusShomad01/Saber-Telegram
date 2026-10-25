@@ -1,0 +1,28 @@
+{
+    "_comment": "8-engine scoring system. Total WAJIB = 100 di kedua mode.",
+    "_backtest_reminder": "Setelah perubahan bobot, jalankan backtest 60 hari untuk validasi distribusi skor (target: ~10% Strong Buy, ~20% BUY, ~30% Watchlist, ~40% Avoid/Sell).",
+
+    "free": {
+        "_description": "Mode default: data broker/asing belum terverifikasi (GoAPI free tier). Bobot Bandarmology & Foreign Flow dikurangi, sisanya didistribusikan ke engine teknikal.",
+        "trend_momentum": 25,
+        "volume_liquidity": 28,
+        "pattern": 13,
+        "gap_analysis": 5,
+        "sector_correlation": 4,
+        "support_resistance": 15,
+        "bandarmology": 5,
+        "foreign_flow": 5
+    },
+
+    "premium": {
+        "_description": "Mode premium: data broker summary & foreign flow terverifikasi real. Bobot dialihkan ke Bandarmology & Foreign Flow sebagai leading indicator terkuat.",
+        "trend_momentum": 20,
+        "volume_liquidity": 20,
+        "pattern": 10,
+        "gap_analysis": 5,
+        "sector_correlation": 4,
+        "support_resistance": 6,
+        "bandarmology": 20,
+        "foreign_flow": 15
+    }
+}
