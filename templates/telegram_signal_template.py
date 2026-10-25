@@ -58,7 +58,12 @@ def format_signal_message(signal_data: dict) -> str:
     sr = cat_scores.get("support_resistance", 0)
     bandar = cat_scores.get("bandarmology", 0)
     ff = cat_scores.get("foreign_flow", 0)
+    gap = cat_scores.get("gap_analysis", 0)
+    sector_corr = cat_scores.get("sector_correlation", 0)
     risk = cat_scores.get("risk_reward", 0)
+
+    # Mode detection
+    is_pure_technical = bool(signal_data.get("pure_technical", False) or signal_data.get("interval") in ["60m", "15m", "1h", "30m"])
 
     # Patterns
     patterns = signal_data.get("patterns", {})
@@ -89,6 +94,9 @@ def format_signal_message(signal_data: dict) -> str:
 
 📌 <b>{ticker}</b> — {name}
 🏢 Sektor: {sector}"""
+
+    if is_pure_technical:
+        msg += "\n⚡ Mode: <b>Pure Technical (Noon Intraday)</b>"
 
     ihsg = signal_data.get("ihsg_regime")
     if ihsg:
@@ -188,16 +196,28 @@ def format_signal_message(signal_data: dict) -> str:
 
 ⚠️ <b>Sinyal {signal}:</b> Tidak ada rekomendasi beli / rencana perdagangan. Saham dinilai kurang mendukung atau berisiko tinggi saat ini."""
 
-    msg += f"""
+    if is_pure_technical:
+        msg += f"""
+
+📈 <b>Score Breakdown (Pure Technical)</b>
+├─ Trend & Momentum   : {trend:.0f}/30
+├─ Volume & Liquidity : {vol:.0f}/25
+├─ Support & Resistance: {sr:.0f}/20
+├─ Pattern & Candle   : {pattern:.0f}/15
+├─ Gap Analysis       : {gap:.0f}/5
+└─ Sector Correlation : {sector_corr:.0f}/5"""
+    else:
+        msg += f"""
 
 📈 <b>Score Breakdown</b>
-├─ Trend & Momentum: {trend:.0f}/25
-├─ Volume & Liquidity: {vol:.0f}/15
-├─ Pattern: {pattern:.0f}/15
-├─ Support/Resistance: {sr:.0f}/10
-├─ Bandarmology: {bandar:.0f}/15
-├─ Foreign Flow: {ff:.0f}/10
-└─ Risk/Reward: {risk:.0f}/10"""
+├─ Trend & Momentum   : {trend:.0f}/20
+├─ Volume & Liquidity : {vol:.0f}/20
+├─ Support & Resistance: {sr:.0f}/13
+├─ Pattern & Candle   : {pattern:.0f}/10
+├─ Gap Analysis       : {gap:.0f}/4
+├─ Sector Correlation : {sector_corr:.0f}/4
+├─ Bandarmology       : {bandar:.0f}/17
+└─ Foreign Flow       : {ff:.0f}/12"""
 
     if pattern_list:
         msg += f"\n\n🔍 <b>Chart Patterns:</b> {', '.join(pattern_list)}"
@@ -205,33 +225,62 @@ def format_signal_message(signal_data: dict) -> str:
     if candle_list:
         msg += f"\n🕯 <b>Candle Patterns:</b> {', '.join(candle_list)}"
 
-    top_buyers = bandar_data.get("top_buyers", [])
-    top_sellers = bandar_data.get("top_sellers", [])
-    top_buyers_lots = bandar_data.get("top_buyers_lots", {})
-    top_sellers_lots = bandar_data.get("top_sellers_lots", {})
+    if not is_pure_technical:
+        top_buyers = bandar_data.get("top_buyers", [])
+        top_sellers = bandar_data.get("top_sellers", [])
+        top_buyers_lots = bandar_data.get("top_buyers_lots", {})
+        top_sellers_lots = bandar_data.get("top_sellers_lots", {})
 
-    buyers_2 = top_buyers[:2]
-    sellers_2 = top_sellers[::-1][:2]
+        buyers_2 = top_buyers[:2]
+        sellers_2 = top_sellers[::-1][:2]
 
-    msg += f"\n\n🏦 <b>Bandarmology:</b> {bandar_signal.replace('_', ' ').title()}"
-    if buyers_2:
-        msg += "\n\n<b>Top Buyer:</b>"
-        for b in buyers_2:
-            lot = top_buyers_lots.get(b)
-            if lot is not None and lot > 0:
-                msg += f"\n- {b} : {lot:,} lot"
-            else:
-                msg += f"\n- {b}"
-    if sellers_2:
-        msg += "\n\n<b>Top Seller:</b>"
-        for s in sellers_2:
-            lot = top_sellers_lots.get(s)
-            if lot is not None and lot > 0:
-                msg += f"\n- {s} : {lot:,} lot"
-            else:
-                msg += f"\n- {s}"
-        
-    msg += f"\n\n🌐 <b>Foreign Flow:</b> {ff_signal.replace('_', ' ').title()}"
+        msg += f"\n\n🏦 <b>Bandarmology:</b> {bandar_signal.replace('_', ' ').title()}"
+        if buyers_2:
+            msg += "\n\n<b>Top Buyer:</b>"
+            for b in buyers_2:
+                lot = top_buyers_lots.get(b)
+                if lot is not None and lot > 0:
+                    msg += f"\n- {b} : {lot:,} lot"
+                else:
+                    msg += f"\n- {b}"
+        if sellers_2:
+            msg += "\n\n<b>Top Seller:</b>"
+            for s in sellers_2:
+                lot = top_sellers_lots.get(s)
+                if lot is not None and lot > 0:
+                    msg += f"\n- {s} : {lot:,} lot"
+                else:
+                    msg += f"\n- {s}"
+            
+        msg += f"\n\n🌐 <b>Foreign Flow:</b> {ff_signal.replace('_', ' ').title()}"
+    else:
+        # Tampilkan key technical indicators jika pure technical
+        technical = signal_data.get("technical", {})
+        rsi = technical.get("rsi")
+        adx = technical.get("adx")
+        vol_ratio = technical.get("volume_spike_ratio") or technical.get("vol_20d_ratio") or technical.get("volume_vs_ma20")
+        vwap = technical.get("vwap")
+        price_above_vwap = technical.get("price_above_vwap")
+        ema_bullish = technical.get("ema_alignment_bullish")
+
+        tech_metrics = []
+        if rsi is not None:
+            rsi_desc = "Overbought" if rsi > 70 else ("Oversold" if rsi < 30 else "Bullish Momentum" if rsi > 50 else "Bearish Momentum")
+            tech_metrics.append(f"├─ RSI (14)       : <code>{rsi:.1f}</code> ({rsi_desc})")
+        if adx is not None:
+            adx_desc = "Strong Trend" if adx >= 25 else "Consolidation"
+            tech_metrics.append(f"├─ ADX (Trend)    : <code>{adx:.1f}</code> ({adx_desc})")
+        if vol_ratio is not None:
+            tech_metrics.append(f"├─ Volume Spike   : <code>{vol_ratio:.1f}x MA20</code>")
+        if vwap is not None and vwap > 0:
+            vwap_pos = "Above" if price_above_vwap else "Below"
+            tech_metrics.append(f"├─ VWAP           : <code>Rp{vwap:,.0f}</code> ({vwap_pos})")
+        if ema_bullish is not None:
+            ema_str = "Bullish (EMA10>20>50)" if ema_bullish else "Consolidation / Mixed"
+            tech_metrics.append(f"└─ EMA Alignment  : <b>{ema_str}</b>")
+
+        if tech_metrics:
+            msg += "\n\n⚡ <b>Key Technical Indicators:</b>\n" + "\n".join(tech_metrics)
 
     if headlines:
         msg += "\n\n📰 <b>Berita Terkait:</b>"

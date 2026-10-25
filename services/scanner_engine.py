@@ -68,6 +68,7 @@ class SignalOutput:
     ihsg_regime: Optional[Dict[str, Any]] = None
     fib_levels: Optional[Dict[str, Any]] = None
     interval: str = ""
+    pure_technical: bool = False
 
 
 class ScannerEngine:
@@ -145,7 +146,7 @@ class ScannerEngine:
     # ------------------------------------------------------------------ #
     #  Parallel Data Fetching
     # ------------------------------------------------------------------ #
-    def _fetch_stock_data(self, ticker: str, interval: str, period_days: int) -> Dict[str, Any]:
+    def _fetch_stock_data(self, ticker: str, interval: str, period_days: int, pure_technical: bool = False) -> Dict[str, Any]:
         """Fetch all data for a single stock (runs in thread pool for parallelism)."""
         try:
             ohlcv = self.data_provider.get_ohlcv(ticker, period_days=period_days, interval=interval)
@@ -153,12 +154,9 @@ class ScannerEngine:
                 return {"ticker": ticker, "error": f"Data tidak cukup ({len(ohlcv)} rows)"}
 
             # Filter out suspended or completely illiquid stocks
-            # If a stock is suspended (suspen), its volume will be 0 on the recent trading days
-            # We check the sum of volume over the last 3 days to avoid holidays/delays causing false positives
             last_3_vol = ohlcv["volume"].tail(3).sum()
             if last_3_vol == 0:
                 return {"ticker": ticker, "error": "Saham suspen atau tidak likuid (volume 0)"}
-
 
             # Get the last actual trading day
             last_date_val = ohlcv["date"].iloc[-1]
@@ -167,19 +165,22 @@ class ScannerEngine:
             else:
                 last_trading_day = pd.to_datetime(last_date_val).date()
 
-            # >>> OPTIMIZATION: Early Hard Filter Check to save GoAPI tokens <<<
-            technical = TechnicalEngine(ohlcv).compute_all()
-            technical["_data_length"] = len(ohlcv)
-            hf_err = self.scoring_engine._check_hard_filters(technical, ohlcv)
-            
-            if hf_err is not None:
-                # Fails hard filter (e.g. low liquidity, no trend) -> Skip GoAPI fetch
-                logger.debug(f"[{ticker}] Early Hard Filter fail: {hf_err} -> Skipping GoAPI")
+            # In Pure Technical Mode (Screener Siang): Skip GoAPI & Supabase completely
+            if pure_technical:
                 broker_data = pd.DataFrame(columns=["date", "broker_code", "buy_lot", "sell_lot", "net_lot", "buy_value", "sell_value", "investor_type", "broker_category"])
                 ff_data = pd.DataFrame(columns=["date", "foreign_buy_lot", "foreign_sell_lot", "foreign_net_lot", "foreign_buy_value", "foreign_sell_value", "foreign_net_value", "foreign_participation_percent"])
             else:
-                broker_data = self.data_provider.get_broker_summary(ticker, target_date=last_trading_day, days=20)
-                ff_data = self.data_provider.get_foreign_flow(ticker, target_date=last_trading_day, days=30)
+                # Early Hard Filter Check to save GoAPI tokens
+                technical = TechnicalEngine(ohlcv).compute_all()
+                technical["_data_length"] = len(ohlcv)
+                hf_err = self.scoring_engine._check_hard_filters(technical, ohlcv, timeframe=interval, pure_technical=pure_technical)
+                
+                if hf_err is not None:
+                    broker_data = pd.DataFrame(columns=["date", "broker_code", "buy_lot", "sell_lot", "net_lot", "buy_value", "sell_value", "investor_type", "broker_category"])
+                    ff_data = pd.DataFrame(columns=["date", "foreign_buy_lot", "foreign_sell_lot", "foreign_net_lot", "foreign_buy_value", "foreign_sell_value", "foreign_net_value", "foreign_participation_percent"])
+                else:
+                    broker_data = self.data_provider.get_broker_summary(ticker, target_date=last_trading_day, days=20)
+                    ff_data = self.data_provider.get_foreign_flow(ticker, target_date=last_trading_day, days=30)
 
             result = {
                 "ticker": ticker,
@@ -196,15 +197,16 @@ class ScannerEngine:
         except Exception as e:
             return {"ticker": ticker, "error": str(e)}
 
-    async def _fetch_all_data_parallel(self, tickers: List[str], interval: str, period_days: int) -> List[Dict]:
+    async def _fetch_all_data_parallel(self, tickers: List[str], interval: str, period_days: int, pure_technical: bool = False) -> List[Dict]:
         """Fetch data for all tickers in parallel using ThreadPoolExecutor."""
         loop = asyncio.get_event_loop()
-        sem = asyncio.Semaphore(5)  # Throttle concurrency to 5
+        sem = asyncio.Semaphore(10 if pure_technical else 5)  # Lebih cepat di pure technical karena tanpa GoAPI rate limit
 
         async def fetch_bounded(t):
             async with sem:
-                await asyncio.sleep(0.2)  # Stagger requests to avoid GoAPI 429 bursts
-                return await loop.run_in_executor(self._executor, self._fetch_stock_data, t, interval, period_days)
+                if not pure_technical:
+                    await asyncio.sleep(0.2)  # Stagger requests to avoid GoAPI 429 bursts
+                return await loop.run_in_executor(self._executor, self._fetch_stock_data, t, interval, period_days, pure_technical)
 
         tasks = [fetch_bounded(t) for t in tickers]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -223,7 +225,7 @@ class ScannerEngine:
     # ------------------------------------------------------------------ #
     #  Core: Scan Single Stock
     # ------------------------------------------------------------------ #
-    async def scan_single(self, ticker: str, run_llm: bool = True, prefetched_data: Optional[Dict] = None, override_interval: Optional[str] = None) -> Optional[SignalOutput]:
+    async def scan_single(self, ticker: str, run_llm: bool = True, prefetched_data: Optional[Dict] = None, override_interval: Optional[str] = None, pure_technical: bool = False) -> Optional[SignalOutput]:
         """Scan a single stock and generate its signal using visual Strategy Agent."""
         stock_info = get_stock_by_ticker(ticker)
         if not stock_info:
@@ -253,25 +255,28 @@ class ScannerEngine:
                 if last_3_vol == 0:
                     raise ValueError(f"Saham {ticker} sedang suspen atau tidak likuid (volume 0).")
 
-
                 last_date_val = ohlcv["date"].iloc[-1]
                 if isinstance(last_date_val, datetime.date):
                     last_trading_day = last_date_val
                 else:
                     last_trading_day = pd.to_datetime(last_date_val).date()
 
-                # >>> OPTIMIZATION: Early Hard Filter Check to save GoAPI tokens <<<
-                technical = TechnicalEngine(ohlcv).compute_all()
-                technical["_data_length"] = len(ohlcv)
-                hf_err = self.scoring_engine._check_hard_filters(technical, ohlcv)
-                
-                if hf_err is not None:
-                    logger.debug(f"[{ticker}] Early Hard Filter fail (scan_single): {hf_err} -> Skipping GoAPI")
+                if pure_technical:
                     broker_data = pd.DataFrame(columns=["date", "broker_code", "buy_lot", "sell_lot", "net_lot", "buy_value", "sell_value", "investor_type", "broker_category"])
                     ff_data = pd.DataFrame(columns=["date", "foreign_buy_lot", "foreign_sell_lot", "foreign_net_lot", "foreign_buy_value", "foreign_sell_value", "foreign_net_value", "foreign_participation_percent"])
                 else:
-                    broker_data = self.data_provider.get_broker_summary(ticker, target_date=last_trading_day, days=20)
-                    ff_data = self.data_provider.get_foreign_flow(ticker, target_date=last_trading_day, days=30)
+                    # Early Hard Filter Check to save GoAPI tokens
+                    technical = TechnicalEngine(ohlcv).compute_all()
+                    technical["_data_length"] = len(ohlcv)
+                    hf_err = self.scoring_engine._check_hard_filters(technical, ohlcv, timeframe=interval, pure_technical=pure_technical)
+                    
+                    if hf_err is not None:
+                        logger.debug(f"[{ticker}] Early Hard Filter fail (scan_single): {hf_err} -> Skipping GoAPI")
+                        broker_data = pd.DataFrame(columns=["date", "broker_code", "buy_lot", "sell_lot", "net_lot", "buy_value", "sell_value", "investor_type", "broker_category"])
+                        ff_data = pd.DataFrame(columns=["date", "foreign_buy_lot", "foreign_sell_lot", "foreign_net_lot", "foreign_buy_value", "foreign_sell_value", "foreign_net_value", "foreign_participation_percent"])
+                    else:
+                        broker_data = self.data_provider.get_broker_summary(ticker, target_date=last_trading_day, days=20)
+                        ff_data = self.data_provider.get_foreign_flow(ticker, target_date=last_trading_day, days=30)
 
                 # Multi-TF for intraday
                 daily_trend = {}
@@ -281,8 +286,14 @@ class ScannerEngine:
             technical = TechnicalEngine(ohlcv).compute_all()
             patterns = PatternEngine(ohlcv).detect_all()
             candles = CandleEngine(ohlcv).detect_all()
-            bandarmology = BandarmologyEngine(broker_data).analyze()
-            foreign_flow = ForeignFlowEngine(ff_data).analyze()
+            
+            if pure_technical:
+                bandarmology = {}
+                foreign_flow = {}
+            else:
+                bandarmology = BandarmologyEngine(broker_data).analyze()
+                foreign_flow = ForeignFlowEngine(ff_data).analyze()
+                
             gap_analysis = GapEngine(ohlcv).analyze()
 
             # Attempt to fetch IHSG data for sector correlation (will hit cache if already fetched)
@@ -309,6 +320,7 @@ class ScannerEngine:
                 timeframe=interval, gap_analysis=gap_analysis,
                 sector_correlation=sector_correlation,
                 ihsg_regime_dict=ihsg_regime,
+                pure_technical=pure_technical,
             )
 
             if score_result.hard_filter_failed:
@@ -344,13 +356,20 @@ class ScannerEngine:
                     foreign_flow=foreign_flow,
                     risk_levels=risk_dict,
                     ihsg_regime=ihsg_regime,
-                    image_path=chart_path
+                    image_path=chart_path,
+                    pure_technical=pure_technical,
                 )
 
             # Integrate Strategy Agent decision or Fallback
             if run_llm and strategy_result and "decision" in strategy_result:
                 final_signal = strategy_result["decision"]
                 final_confidence = int(strategy_result.get("confidence_score", 5))
+
+                # Pure technical guard: jika scoring deterministik menghasilkan BUY / WATCHLIST,
+                # jangan biarkan AI vision membunuh sinyal menjadi AVOID
+                if pure_technical and score_result.signal in ("BUY", "STRONG BUY", "WATCHLIST") and final_signal in ("AVOID", "SELL"):
+                    logger.info(f"[{ticker}] Pure Technical guard: LLM suggested {final_signal}, keeping technical signal {score_result.signal}")
+                    final_signal = score_result.signal
 
                 conf_label = "MEDIUM"
                 if final_confidence >= 8:
@@ -360,9 +379,10 @@ class ScannerEngine:
                 elif final_confidence <= 3:
                     conf_label = "LOW"
 
+                cross_check_title = "Cross-Check Indikator Teknikal:" if pure_technical else "Cross-Check Indikator & Aliran Dana:"
                 opinion = (
                     f"📈 **Analisis Visual Grafik:**\n{strategy_result.get('chart_visual_analysis', '')}\n\n"
-                    f"🏦 **Cross-Check Indikator & Aliran Dana:**\n{strategy_result.get('indicators_cross_check', '')}\n\n"
+                    f"🏦 **{cross_check_title}**\n{strategy_result.get('indicators_cross_check', '')}\n\n"
                     f"🌍 **Regime IHSG ({ihsg_regime['regime']}):**\n{strategy_result.get('ihsg_regime_impact', '')}\n\n"
                     f"💡 **Keputusan & Alasan:**\n{strategy_result.get('final_reasoning', '')}"
                 )
@@ -410,6 +430,7 @@ class ScannerEngine:
                 ihsg_regime=ihsg_regime,
                 fib_levels=risk_levels.fib_levels,
                 interval=interval,
+                pure_technical=pure_technical,
             )
 
             # Save to Database
@@ -498,9 +519,10 @@ class ScannerEngine:
     # ------------------------------------------------------------------ #
     #  Parallel Full Scan
     # ------------------------------------------------------------------ #
-    async def scan_all(self, top_n: int = 10, override_interval: Optional[str] = None) -> List[SignalOutput]:
+    async def scan_all(self, top_n: int = 10, override_interval: Optional[str] = None, pure_technical: bool = False) -> List[SignalOutput]:
         """Scan all stocks in the universe with parallel data fetching.
         
+        - In pure_technical mode: Only technical indicators are evaluated (Noon screener).
         - In DAY_TRADE_MODE: Uses the FULL IDX universe (all stocks except FCA & delisted).
         - In normal mode: Uses the curated DEFAULT_STOCK_UNIVERSE (~160 stocks).
         """
@@ -530,8 +552,9 @@ class ScannerEngine:
             period_days = 120
 
         # ========== PHASE 1: Parallel data fetch ==========
-        logger.info(f"[scan_all] Phase 1: Fetching data for {len(tickers)} stocks in parallel...")
-        all_data = await self._fetch_all_data_parallel(tickers, interval, period_days)
+        mode_text = "PURE TEKNIKAL" if pure_technical else "FULL (Teknikal + Bandar + Asing)"
+        logger.info(f"[scan_all] Phase 1: Fetching data for {len(tickers)} stocks in parallel [{mode_text}]...")
+        all_data = await self._fetch_all_data_parallel(tickers, interval, period_days, pure_technical=pure_technical)
         logger.info(f"[scan_all] Phase 1 complete: {len(all_data)} stocks fetched successfully.")
 
         # ========== PHASE 2: Score all (deterministic, fast) ==========
@@ -541,13 +564,19 @@ class ScannerEngine:
         results = []
         for stock_data in all_data:
             try:
-                signal = await self.scan_single(stock_data["ticker"], run_llm=False, prefetched_data=stock_data, override_interval=override_interval)
+                signal = await self.scan_single(
+                    stock_data["ticker"],
+                    run_llm=False,
+                    prefetched_data=stock_data,
+                    override_interval=override_interval,
+                    pure_technical=pure_technical,
+                )
                 if signal:
                     results.append(signal)
             except Exception as e:
                 logger.error(f"Error scanning {stock_data['ticker']}: {e}")
 
-        # ── Log filter funnel summary (Masalah 3) ──
+        # ── Log filter funnel summary ──
         funnel = self.scoring_engine.get_scan_stats()
         logger.info(funnel.to_summary_text())
 
@@ -571,7 +600,7 @@ class ScannerEngine:
             # Return empty list — scheduler akan kirim pesan "tidak ada saham yang memenuhi kriteria"
             return []
 
-        # Take top_n candidates — with SECTOR DIVERSIFICATION (Fix #7)
+        # Take top_n candidates — with SECTOR DIVERSIFICATION
         # Max 3 saham per sektor agar tidak semua dari sektor yang sama
         MAX_PER_SECTOR = 3
         top_candidates = self._diversify_by_sector(results, top_n=top_n, max_per_sector=MAX_PER_SECTOR)
@@ -584,7 +613,12 @@ class ScannerEngine:
         async def process_cand(cand):
             async with sem:
                 try:
-                    final_sig = await self.scan_single(cand.ticker, run_llm=True, override_interval=override_interval)
+                    final_sig = await self.scan_single(
+                        cand.ticker,
+                        run_llm=True,
+                        override_interval=override_interval,
+                        pure_technical=pure_technical,
+                    )
                     await asyncio.sleep(4)
                     if final_sig:
                         return final_sig
@@ -701,4 +735,6 @@ class ScannerEngine:
             "chart_path": signal.chart_path,
             "ihsg_regime": signal.ihsg_regime,
             "fib_levels": signal.fib_levels,
+            "interval": signal.interval,
+            "pure_technical": getattr(signal, "pure_technical", False),
         }

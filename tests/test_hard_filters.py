@@ -175,25 +175,25 @@ class TestLiquidityFilter:
         assert result.passed is True
 
     def test_gugur_jika_volume_kurang(self, engine):
-        """Volume < 5 juta lot → gugur dengan category 'volume'."""
-        tech = make_technical(volume_avg_20=1_000_000)  # < 5 juta
+        """Volume < 1 juta lembar → gugur dengan category 'volume'."""
+        tech = make_technical(volume_avg_20=500_000)  # < 1 juta
         ohlcv = make_ohlcv_df(avg_value=50_000_000_000)  # value OK
         result = engine._check_liquidity_filter(tech, ohlcv)
         assert result.passed is False
         assert result.category == "volume"
 
     def test_gugur_jika_value_kurang(self, engine):
-        """Value < Rp20 miliar → gugur dengan category 'value'."""
+        """Value < Rp5 miliar → gugur dengan category 'value'."""
         tech = make_technical(volume_avg_20=10_000_000)  # volume OK
-        ohlcv = make_ohlcv_df(avg_value=5_000_000_000)   # < 20 miliar
+        ohlcv = make_ohlcv_df(avg_value=1_000_000_000)   # < 5 miliar
         result = engine._check_liquidity_filter(tech, ohlcv)
         assert result.passed is False
         assert result.category == "value"
 
     def test_gugur_jika_keduanya_kurang(self, engine):
         """Keduanya gagal → category 'volume_and_value'."""
-        tech = make_technical(volume_avg_20=1_000_000)   # < 5 juta
-        ohlcv = make_ohlcv_df(avg_value=5_000_000_000)  # < 20 miliar
+        tech = make_technical(volume_avg_20=500_000)   # < 1 juta
+        ohlcv = make_ohlcv_df(avg_value=1_000_000_000)  # < 5 miliar
         result = engine._check_liquidity_filter(tech, ohlcv)
         assert result.passed is False
         assert result.category == "volume_and_value"
@@ -213,11 +213,11 @@ class TestLiquidityFilter:
 
     def test_volume_threshold_constant(self, engine):
         """Pastikan threshold volume tidak berubah tanpa sengaja."""
-        assert engine.MIN_AVG_VOLUME_LOT == 5_000_000
+        assert engine.MIN_AVG_VOLUME_LOT == 1_000_000
 
     def test_value_threshold_constant(self, engine):
         """Pastikan threshold value tidak berubah tanpa sengaja."""
-        assert engine.MIN_AVG_VALUE_IDR == 20_000_000_000
+        assert engine.MIN_AVG_VALUE_IDR == 5_000_000_000
 
 
 # ─────────────────────────────────────────────

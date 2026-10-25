@@ -306,16 +306,21 @@ async def job_weekly_backtest():
 #  Job: Intraday Scan
 # ================================================================== #
 
-async def job_intraday_scan(interval_override: str | None = None):
+async def job_intraday_scan(interval_override: str | None = None, pure_technical: bool | None = None):
     """Run morning pre-market / noon scan and send top signals to Telegram."""
-    logger.info(f"[Scheduler] Starting intraday scan at {datetime.now()} with interval {interval_override}")
+    from app.config import get_settings
+    settings = get_settings()
+
+    interval_used = interval_override if interval_override else settings.CHART_INTERVAL
+    if pure_technical is None:
+        pure_technical = (interval_used in ["60m", "15m", "1h", "30m"])
+
+    mode_str = "PURE TEKNIKAL" if pure_technical else "STANDARD (Teknikal + Bandar + Asing)"
+    logger.info(f"[Scheduler] Starting intraday scan at {datetime.now()} with interval {interval_used} [Mode: {mode_str}]")
 
     try:
         scanner = ScannerEngine()
-        signals = await scanner.scan_all(top_n=10, override_interval=interval_override)
-
-        from app.config import get_settings
-        settings = get_settings()
+        signals = await scanner.scan_all(top_n=10, override_interval=interval_override, pure_technical=pure_technical)
 
         if settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID:
             import os
@@ -329,23 +334,28 @@ async def job_intraday_scan(interval_override: str | None = None):
             BULLISH_SIGNALS = {"STRONG BUY", "BUY", "WATCHLIST"}
             bullish_signals = [s for s in signals if s.signal in BULLISH_SIGNALS] if signals else []
 
-            interval_used = interval_override if interval_override else settings.CHART_INTERVAL
-            scan_name = "MORNING PRE-MARKET SCAN" if interval_used == "1d" else "NOON INTRADAY SCAN"
+            if pure_technical:
+                scan_name = "NOON INTRADAY SCAN (60m — PURE TEKNIKAL)"
+                scan_emoji = "☀️"
+            else:
+                scan_name = "MORNING PRE-MARKET SCAN" if interval_used == "1d" else "NOON INTRADAY SCAN"
+                scan_emoji = "🌅"
 
             if not bullish_signals:
                 await send_telegram_with_retry(
                     bot, settings.TELEGRAM_CHAT_ID, message_thread_id=thread_id,
-                    text=f"🌅 <b>{scan_name} ({interval_used})</b>\n\n⚠️ Tidak ada saham yang memenuhi kriteria (WATCHLIST / BUY / STRONG BUY).\nMarket sedang lemah, disarankan wait &amp; see.",
+                    text=f"{scan_emoji} <b>{scan_name}</b>\n\n⚠️ Tidak ada saham yang memenuhi kriteria (WATCHLIST / BUY / STRONG BUY).\nMarket sedang lemah atau konsolidasi, disarankan wait &amp; see.",
                 )
                 return
 
-            header_msg = f"🌅 <b>{scan_name} ({interval_used})</b>\nBerikut adalah <b>{len(bullish_signals)} sinyal intraday bullish</b> terbaik:"
+            header_msg = f"{scan_emoji} <b>{scan_name}</b>\nBerikut adalah <b>{len(bullish_signals)} sinyal bullish</b> terbaik:"
             await send_telegram_with_retry(bot, settings.TELEGRAM_CHAT_ID, text=header_msg, message_thread_id=thread_id)
 
             from templates.telegram_signal_template import format_signal_message
 
             for s in bullish_signals:
                 signal_dict = scanner.signal_to_dict(s)
+                signal_dict["pure_technical"] = pure_technical
                 full_msg = format_signal_message(signal_dict)
 
                 chart_path = getattr(s, 'chart_path', None)
@@ -362,7 +372,7 @@ async def job_intraday_scan(interval_override: str | None = None):
                 # Delay between messages to avoid Telegram rate limit
                 await asyncio.sleep(1.5)
 
-            logger.info(f"[Scheduler] Sent {len(bullish_signals)} bullish morning signals with charts to Telegram")
+            logger.info(f"[Scheduler] Sent {len(bullish_signals)} bullish signals ({'pure technical' if pure_technical else 'standard'}) with charts to Telegram")
         else:
             logger.warning("[Scheduler] Telegram not configured — skipping send")
 

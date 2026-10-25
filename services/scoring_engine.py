@@ -208,11 +208,26 @@ class ScoringEngine:
         "foreign_flow":       12,
     }
 
+    # Bobot khusus untuk Screener Siang (Noon Intraday) — PURE TEKNIKAL (Tanpa Bandarmologi & Foreign Flow)
+    # Total WAJIB 100 poin murni dari analisis teknikal, momentum, pola, dan volume
+    CATEGORIES_PURE_TECHNICAL = {
+        "trend_momentum":    30,
+        "volume_liquidity":  25,
+        "pattern":           15,
+        "gap_analysis":       5,
+        "sector_correlation": 5,
+        "support_resistance": 20,
+        "bandarmology":       0,
+        "foreign_flow":       0,
+    }
+
     def __init__(self):
         self._scan_stats = FilterFunnelStats()  # accumulates during scan_all()
 
-    def _get_categories(self, data_mode: str) -> Dict[str, float]:
-        """Return the unified weight dict."""
+    def _get_categories(self, data_mode: str, pure_technical: bool = False) -> Dict[str, float]:
+        """Return the category weight dict."""
+        if pure_technical or data_mode == "pure_technical":
+            return {k: float(v) for k, v in self.CATEGORIES_PURE_TECHNICAL.items()}
         return {k: float(v) for k, v in self.CATEGORIES.items()}
 
     # ------------------------------------------------------------------ #
@@ -229,7 +244,7 @@ class ScoringEngine:
 
     def _resolve_data_mode(self, bandarmology: Dict, foreign_flow: Dict) -> str:
         """
-        Mode data sekarang tunggal (standard) karena bobot disamakan.
+        Mode data standard.
         """
         return "standard"
 
@@ -246,18 +261,20 @@ class ScoringEngine:
         gap_analysis: Optional[Dict[str, Any]] = None,
         sector_correlation: Optional[Dict[str, Any]] = None,
         ihsg_regime_dict: Optional[Dict[str, Any]] = None,
+        pure_technical: bool = False,
     ) -> ScoringResult:
         """
-        Score a stock based on all 8 analysis engines.
-        Returns a ScoringResult with signal and confidence.
+        Score a stock based on analysis engines.
+        Jika pure_technical=True (Screener Siang), bobot bandarmology dan foreign flow dinonaktifkan,
+        skor 100% dihitung dari indikator teknikal.
         Total skor selalu dalam range [0, 100].
         """
         result = ScoringResult(ticker=ticker, total_score=0)
         all_rules: List[RuleResult] = []
 
-        # Resolve data mode (free vs premium) berdasarkan kualitas data
-        data_mode = self._resolve_data_mode(bandarmology, foreign_flow)
-        categories = self._get_categories(data_mode)
+        # Resolve data mode (pure_technical vs standard)
+        data_mode = "pure_technical" if pure_technical else self._resolve_data_mode(bandarmology, foreign_flow)
+        categories = self._get_categories(data_mode, pure_technical=pure_technical)
         result.data_mode = data_mode
 
         # Warning flag untuk Telegram jika data tidak terverifikasi
@@ -277,7 +294,7 @@ class ScoringEngine:
         # Track total stocks per scan
         self._scan_stats.total_stocks += 1
 
-        hf_result = self._run_hard_filters(technical, ohlcv_df, data_len)
+        hf_result = self._run_hard_filters(technical, ohlcv_df, data_len, timeframe=timeframe, pure_technical=pure_technical)
         if not hf_result.passed:
             result.hard_filter_failed   = True
             result.hard_filter_reason   = hf_result.reason
@@ -325,14 +342,16 @@ class ScoringEngine:
         all_rules.extend(self._score_risk_reward(technical, ohlcv_df))
 
         # ============================================================ #
-        #  7. BANDARMOLOGY
+        #  7. BANDARMOLOGY (Hanya jika BUKAN pure_technical)
         # ============================================================ #
-        all_rules.extend(self._score_bandarmology(bandarmology))
+        if not pure_technical:
+            all_rules.extend(self._score_bandarmology(bandarmology))
 
         # ============================================================ #
-        #  8. FOREIGN FLOW
+        #  8. FOREIGN FLOW (Hanya jika BUKAN pure_technical)
         # ============================================================ #
-        all_rules.extend(self._score_foreign_flow(foreign_flow))
+        if not pure_technical:
+            all_rules.extend(self._score_foreign_flow(foreign_flow))
 
         # ============================================================ #
         #  AGGREGATE — clamp setiap kategori ke max bobotnya
@@ -342,6 +361,10 @@ class ScoringEngine:
         cat_scores = {}
         cat_raw = {}
         for cat, max_pts in categories.items():
+            if max_pts == 0:
+                cat_scores[cat] = 0.0
+                cat_raw[cat] = 0.0
+                continue
             cat_total = sum(r.score for r in all_rules if r.category == cat)
             cat_raw[cat]    = cat_total
             cat_scores[cat] = max(0.0, min(cat_total, max_pts))
@@ -355,7 +378,7 @@ class ScoringEngine:
         # ============================================================ #
         daily_trend = technical.get("daily_trend_bias")
         if daily_trend and settings.DAY_TRADE_MODE:
-            current_signal = self._map_signal(result.total_score, timeframe)
+            current_signal = self._map_signal(result.total_score, timeframe, pure_technical=pure_technical)
             is_bullish_signal = current_signal in ("STRONG BUY", "BUY", "WATCHLIST")
 
             if daily_trend == "bullish" and is_bullish_signal:
@@ -389,7 +412,7 @@ class ScoringEngine:
         if ihsg_regime_dict and "regime_raw" in ihsg_regime_dict:
             regime_str = ihsg_regime_dict["regime_raw"]
             
-        is_intraday = timeframe in ["15m", "60m", "1h", "60"]
+        is_intraday = (timeframe in ["15m", "60m", "1h", "60"]) or pure_technical
         final_score = apply_ihsg_regime_adjustment(raw_score, regime_str, is_intraday=is_intraday)
         
         # Log jika ada penyesuaian (default: tidak ada modifikasi skor)
@@ -404,17 +427,17 @@ class ScoringEngine:
         result.total_score = final_score
 
         # Map to signal
-        result.signal = self._map_signal(result.total_score, timeframe)
-        result.confidence_score = self._map_confidence_score(result.total_score)
+        result.signal = self._map_signal(result.total_score, timeframe, pure_technical=pure_technical)
+        result.confidence_score = self._map_confidence_score(result.total_score, pure_technical=pure_technical)
         result.confidence_label = self._map_confidence_label(result.confidence_score)
 
         # Volume Confirmation wajib untuk STRONG BUY
-        # Sinyal hanya naik ke STRONG BUY jika ada volume breakout nyata (>= 2x avg)
+        # Sinyal hanya naik ke STRONG BUY jika ada volume breakout nyata (>= 1.3x avg)
         # Tanpa konfirmasi volume, downgrade ke BUY untuk menghindari false breakout
         if result.signal == "STRONG BUY":
             vol_ratio = technical.get("volume_ratio", 0)
             vol_breakout = technical.get("volume_breakout", False)
-            if not vol_breakout and vol_ratio < 1.5:
+            if not vol_breakout and vol_ratio < 1.3:
                 result.signal = "BUY"
                 result.confidence_score = min(result.confidence_score, 7)
                 result.confidence_label = "HIGH CONVICTION"
@@ -459,8 +482,10 @@ class ScoringEngine:
 
     ADX_HARD_FILTER_THRESHOLD = 15   # turun dari 20; zona 15-20 dinilai oleh scoring engine
     ADX_WARMUP_DAYS           = 28   # Wilder's smoothing butuh ~28 bar untuk stabil
-    MIN_AVG_VOLUME_LOT        = 5_000_000    # 5 juta lot
-    MIN_AVG_VALUE_IDR         = 20_000_000_000  # Rp 20 miliar
+    MIN_AVG_VOLUME_LOT        = 1_000_000       # 1 juta lembar (~10.000 lot) untuk daily
+    MIN_AVG_VALUE_IDR         = 5_000_000_000   # Rp 5 miliar untuk daily
+    MIN_AVG_VOLUME_LOT_INTRADAY = 100_000       # 100 ribu lembar (~1.000 lot) untuk intraday
+    MIN_AVG_VALUE_IDR_INTRADAY  = 1_000_000_000 # Rp 1 miliar untuk intraday
     MAX_ATR_PCT               = 7.0  # %
 
     def _check_adx_filter(self, technical: Dict, data_len: int) -> HardFilterResult:
@@ -485,47 +510,50 @@ class ScoringEngine:
             )
         return HardFilterResult(passed=True)
 
-    def _check_liquidity_filter(self, technical: Dict, ohlcv_df) -> HardFilterResult:
+    def _check_liquidity_filter(self, technical: Dict, ohlcv_df, timeframe: str = "1d", pure_technical: bool = False) -> HardFilterResult:
         """
-        Masalah 4: Volume DAN Value sebagai independent check (AND logic).
-        - Volume filter (lot): pastikan likuiditas cukup untuk masuk/keluar tanpa slippage.
-        - Value filter (IDR): filter saham harga sangat rendah dengan volume besar tapi nilai kecil.
-        Keduanya harus lolos. Tracking terpisah untuk fine-tuning threshold.
+        Volume DAN Value check dengan threshold adaptif:
+        - Intraday / Pure Technical (60m): volume min 100.000 lembar, value min Rp 1 Miliar
+        - Daily (1d): volume min 1.000.000 lembar, value min Rp 5 Miliar (realistis untuk bursa IDX)
         """
         if settings.DATA_PROVIDER == "mock":
             return HardFilterResult(passed=True)
 
+        is_intraday = (timeframe in ["15m", "60m", "1h", "60"]) or pure_technical
+        min_vol = self.MIN_AVG_VOLUME_LOT_INTRADAY if is_intraday else self.MIN_AVG_VOLUME_LOT
+        min_val = self.MIN_AVG_VALUE_IDR_INTRADAY if is_intraday else self.MIN_AVG_VALUE_IDR
+
         vol_avg_20 = technical.get("volume_avg_20", 0) or 0
-        volume_passed = vol_avg_20 >= self.MIN_AVG_VOLUME_LOT
+        volume_passed = vol_avg_20 >= min_vol
 
         value_passed = True  # default jika kolom tidak tersedia
         if ohlcv_df is not None and len(ohlcv_df) > 0 and "value" in ohlcv_df.columns:
             avg_value = ohlcv_df["value"].tail(20).mean()
-            value_passed = avg_value >= self.MIN_AVG_VALUE_IDR
+            value_passed = avg_value >= min_val
 
         if not volume_passed and not value_passed:
             return HardFilterResult(
                 passed=False, category="volume_and_value",
                 reason=(
-                    f"Gagal volume ({vol_avg_20:,.0f} lot < {self.MIN_AVG_VOLUME_LOT:,.0f}) "
-                    f"DAN value (< Rp20M)"
+                    f"Gagal volume ({vol_avg_20:,.0f} < {min_vol:,.0f}) "
+                    f"DAN value (< Rp{min_val/1e9:.1f}M)"
                 )
             )
         if not volume_passed:
             return HardFilterResult(
                 passed=False, category="volume",
-                reason=f"Volume avg 20H terlalu rendah ({vol_avg_20:,.0f} lot) — minimum {self.MIN_AVG_VOLUME_LOT:,.0f} lot"
+                reason=f"Volume avg 20 bar terlalu rendah ({vol_avg_20:,.0f}) — minimum {min_vol:,.0f}"
             )
         if not value_passed:
             avg_value_display = ohlcv_df["value"].tail(20).mean() if (ohlcv_df is not None and "value" in ohlcv_df.columns) else 0
             return HardFilterResult(
                 passed=False, category="value",
-                reason=f"Nilai transaksi rata-rata 20H terlalu rendah ({avg_value_display/1e9:.1f}M) — minimum Rp20M"
+                reason=f"Nilai transaksi rata-rata 20 bar terlalu rendah (Rp{avg_value_display/1e9:.2f}M) — minimum Rp{min_val/1e9:.1f}M"
             )
         return HardFilterResult(passed=True)
 
     def _check_atr_filter(self, technical: Dict) -> HardFilterResult:
-        """ATR filter: tolak saham yang terlalu volatile (> 7% per hari)."""
+        """ATR filter: tolak saham yang terlalu volatile (> 7% per bar/hari)."""
         if settings.DATA_PROVIDER == "mock":
             return HardFilterResult(passed=True)
 
@@ -537,7 +565,7 @@ class ScoringEngine:
             )
         return HardFilterResult(passed=True)
 
-    def _run_hard_filters(self, technical: Dict, ohlcv_df, data_len: int) -> HardFilterResult:
+    def _run_hard_filters(self, technical: Dict, ohlcv_df, data_len: int, timeframe: str = "1d", pure_technical: bool = False) -> HardFilterResult:
         """
         Orkestrasi semua Hard Filter secara berurutan.
         Mengembalikan HardFilterResult pertama yang gagal, atau passed=True jika semua lolos.
@@ -545,7 +573,7 @@ class ScoringEngine:
         """
         for check_fn in [
             lambda: self._check_adx_filter(technical, data_len),
-            lambda: self._check_liquidity_filter(technical, ohlcv_df),
+            lambda: self._check_liquidity_filter(technical, ohlcv_df, timeframe=timeframe, pure_technical=pure_technical),
             lambda: self._check_atr_filter(technical),
         ]:
             result = check_fn()
@@ -554,9 +582,9 @@ class ScoringEngine:
         return HardFilterResult(passed=True)
 
     # -- Backward-compat alias (agar kode lain yang memanggil tidak error) --
-    def _check_hard_filters(self, technical: Dict, ohlcv_df=None) -> Optional[str]:
+    def _check_hard_filters(self, technical: Dict, ohlcv_df=None, timeframe: str = "1d", pure_technical: bool = False) -> Optional[str]:
         data_len = technical.get("_data_length", 60)
-        r = self._run_hard_filters(technical, ohlcv_df, data_len)
+        r = self._run_hard_filters(technical, ohlcv_df, data_len, timeframe=timeframe, pure_technical=pure_technical)
         return None if r.passed else r.reason
 
     # ------------------------------------------------------------------ #
@@ -1118,14 +1146,31 @@ class ScoringEngine:
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _map_signal(score: float, timeframe: str = "1d") -> str:
+    def _map_signal(score: float, timeframe: str = "1d", pure_technical: bool = False) -> str:
         """
         Map skor ke sinyal:
-        - 90 - 100 : STRONG BUY
-        - 75 - 89  : BUY
-        - 55 - 74  : WATCHLIST
-        - < 55     : AVOID
+        Pure Technical mode (Siang / Intraday 60m):
+        - >= 75 : STRONG BUY
+        - >= 60 : BUY
+        - >= 40 : WATCHLIST
+        - < 40  : AVOID
+
+        Standard mode (Pagi / EOD):
+        - >= strong_buy_threshold (90) : STRONG BUY
+        - >= buy_threshold (75) : BUY
+        - >= 55 : WATCHLIST
+        - < 55  : AVOID
         """
+        if pure_technical:
+            if score >= 75.0:
+                return "STRONG BUY"
+            elif score >= 60.0:
+                return "BUY"
+            elif score >= 40.0:
+                return "WATCHLIST"
+            else:
+                return "AVOID"
+
         thresholds = _load_adaptive_thresholds(timeframe)
         strong_buy_thresh = thresholds.get("strong_buy_threshold", 90.0)
         buy_thresh = thresholds.get("buy_threshold", 75.0)
@@ -1140,7 +1185,29 @@ class ScoringEngine:
             return "AVOID"
 
     @staticmethod
-    def _map_confidence_score(score: float) -> int:
+    def _map_confidence_score(score: float, pure_technical: bool = False) -> int:
+        if pure_technical:
+            if score >= 80:
+                return 10
+            elif score >= 70:
+                return 9
+            elif score >= 60:
+                return 8
+            elif score >= 50:
+                return 7
+            elif score >= 40:
+                return 6
+            elif score >= 35:
+                return 5
+            elif score >= 25:
+                return 4
+            elif score >= 20:
+                return 3
+            elif score >= 10:
+                return 2
+            else:
+                return 1
+
         if score >= 90:
             return 10
         elif score >= 80:

@@ -171,6 +171,7 @@ class LLMEngine:
         risk_levels: Dict[str, Any],
         ihsg_regime: Dict[str, Any],
         image_path: str,
+        pure_technical: bool = False,
     ) -> Dict[str, Any]:
         """
         Run the multimodal Strategy Agent.
@@ -193,6 +194,7 @@ class LLMEngine:
             foreign_flow=foreign_flow,
             risk_levels=risk_levels,
             ihsg_regime=ihsg_regime,
+            pure_technical=pure_technical,
         )
 
         try:
@@ -298,6 +300,7 @@ class LLMEngine:
         foreign_flow: Dict[str, Any],
         risk_levels: Dict[str, Any],
         ihsg_regime: Dict[str, Any],
+        pure_technical: bool = False,
     ) -> str:
         """Build the rich strategy decision prompt in Indonesian."""
         patterns_list = pattern.get("patterns", [])
@@ -321,7 +324,14 @@ class LLMEngine:
         ema_instruction = "Lihat posisi harga terhadap garis EMA 20 (kuning) dan EMA 50 (biru). Apakah terjadi golden cross atau death cross?"
         indicators_desc = "EMA 20 & EMA 50"
 
-        if settings.DAY_TRADE_MODE:
+        if pure_technical:
+            mode_label = f"DAY TRADING NOON INTRADAY ({settings.CHART_INTERVAL} — PURE TEKNIKAL)"
+            exit_rule = "Keluar dari posisi sebelum jam penutupan pasar 16:00 WIB hari ini. JANGAN MENAHAN POSISI SEMALAM (no overnight hold)."
+            stop_loss_rule = "Disiplin ketat dengan stop loss yang sangat ketat (target 1% - 1.5% dari harga beli, atau exit ketika momentum melemah)."
+            vwap_instruction = "- Perhatikan garis VWAP (garis putus-putus merah muda/magenta). Jika harga berada di atas VWAP, tandanya bullish intraday kuat. Jika di bawah VWAP, tandanya bearish intraday."
+            ema_instruction = "Lihat posisi harga terhadap garis EMA 9 dan EMA 21."
+            indicators_desc = "EMA 9, EMA 21, dan VWAP"
+        elif settings.DAY_TRADE_MODE:
             mode_label = f"DAY TRADING (Intraday {settings.CHART_INTERVAL})"
             exit_rule = "Keluar dari posisi sebelum jam penutupan pasar 16:00 WIB hari ini. JANGAN MENAHAN POSISI SEMALAM (no overnight hold)."
             stop_loss_rule = "Disiplin ketat dengan stop loss yang sangat ketat (target 1% - 1.5% dari harga beli, atau exit ketika momentum melemah)."
@@ -343,12 +353,34 @@ class LLMEngine:
 - Jika daily trend BULLISH, sinyal BUY intraday jauh lebih reliable.
 """
 
+        cross_check_task = "Melakukan cross-check terhadap seluruh indikator teknikal (EMA, VWAP, RSI, MACD, Volume Breakout) dan pola candlestick yang disediakan." if pure_technical else "Melakukan cross-check terhadap seluruh indikator teknikal, pola candlestick, bandarmology, dan foreign flow yang disediakan."
+
+        if pure_technical:
+            data_flow_section = """=== INSTRUKSI KHUSUS PURE TEKNIKAL ===
+⚠️ Mode ini beroperasi secara PURE TEKNIKAL (Tanpa Bandarmology, Broker Summary, atau Foreign Flow).
+Fokus penuh pada:
+1. Posisi harga terhadap EMA 9, EMA 21, dan VWAP.
+2. Volume breakout dan candlestick reversal intraday.
+3. Level Support/Resistance, Target Profit (TP), dan Risk-to-Reward ratio yang menguntungkan.
+DILARANG membatalkan sinyal atau memberi vonis AVOID hanya karena ketiadaan data broker."""
+            cross_check_field_desc = "Penjelasan hasil cross-check indikator teknikal (EMA, VWAP, RSI, MACD, Volume Breakout) (Maksimal 2-3 kalimat padat)"
+        else:
+            data_flow_section = f"""🏦 Bandarmology Flow:
+- Signal: {bandar_signal.replace('_', ' ').title()}
+- Smart Money: {'Accumulation' if bandarmology.get('smart_money_buying') else 'Distribution'}
+- Smart vs Retail Divergence: {bandarmology.get('smart_vs_retail_divergence')}
+
+🌐 Foreign Flow:
+- Signal: {ff_signal.replace('_', ' ').title()}
+- Net Buy Today: Rp{foreign_flow.get('ff_net_value_today', 0):,.0f}"""
+            cross_check_field_desc = "Penjelasan hasil cross-check indikator teknikal dan aliran dana (Maksimal 2-3 kalimat padat)"
+
         prompt = f"""Kamu adalah "Strategy Agent", otak utama (brain engine) dari Saber Trader AI Signal Bot.
 Saat ini kamu beroperasi dalam mode: **{mode_label}**.
 
 Tugas utama kamu adalah:
 1. Menganalisis grafik candlestick (OHLCV, {indicators_desc}, Volume, RSI) secara visual yang dilampirkan.
-2. Melakukan cross-check terhadap seluruh indikator teknikal, pola candlestick, bandarmology, dan foreign flow yang disediakan.
+2. {cross_check_task}
 3. Menjadikan kondisi IHSG murni sebagai informasi konteks pasar makro (BUKAN sebagai penentu keputusan utama dan DILARANG menurunkan skor/sinyal hanya karena IHSG).
 4. Menerapkan aturan trading yang ketat untuk mode {mode_label}:
    - Aturan Keluar: {exit_rule}
@@ -362,7 +394,7 @@ IHSG Regime: {ihsg_regime.get('regime', 'SIDEWAYS')} ({ihsg_regime.get('descript
 - Kondisi IHSG HANYA berfungsi sebagai alat informasi / wawasan pasar secara umum bagi trader.
 - JANGAN PERNAH menurunkan skor, membatalkan sinyal, atau melarang keputusan BUY/STRONG BUY hanya karena kondisi IHSG sedang BEARISH atau SIDEWAYS.
 - Banyak saham individual yang tetap naik kencang dan memberikan profit besar meskipun pasar IHSG sedang turun/sideways.
-- Keputusan BUY/STRONG BUY/WATCHLIST/AVOID/SELL harus berfokus penuh dan murni pada kualitas setup saham itu sendiri (indikator teknikal, volume breakout, akumulasi bandar, foreign flow, dan Risk/Reward).
+- Keputusan BUY/STRONG BUY/WATCHLIST/AVOID/SELL harus berfokus penuh dan murni pada kualitas setup saham itu sendiri (indikator teknikal, volume breakout, pola candlestick, dan Risk/Reward).
 {mtf_section}
 === DATA INDIKATOR ===
 Saham: {ticker}
@@ -372,20 +404,13 @@ Saham: {ticker}
 - MACD: {technical.get('macd', 'N/A')}
 - ADX: {technical.get('adx', 'N/A')}
 - Trend EMAs: Price vs EMA9: {technical.get('price_above_ema9') if settings.DAY_TRADE_MODE else technical.get('price_above_ema20')}, Price vs EMA21: {technical.get('price_above_ema21') if settings.DAY_TRADE_MODE else technical.get('price_above_ema50')}
-{"- Price vs VWAP: " + str(technical.get('price_above_vwap')) if settings.DAY_TRADE_MODE else ""}
+{"- Price vs VWAP: " + str(technical.get('price_above_vwap')) if (settings.DAY_TRADE_MODE or pure_technical) else ""}
 
 🔍 Patterns & Candles:
 - Chart Patterns: {', '.join(patterns_list) if patterns_list else 'Tidak ada'}
 - Candle Patterns: {', '.join(candle_list) if candle_list else 'Tidak ada'}
 
-🏦 Bandarmology Flow:
-- Signal: {bandar_signal.replace('_', ' ').title()}
-- Smart Money: {'Accumulation' if bandarmology.get('smart_money_buying') else 'Distribution'}
-- Smart vs Retail Divergence: {bandarmology.get('smart_vs_retail_divergence')}
-
-🌐 Foreign Flow:
-- Signal: {ff_signal.replace('_', ' ').title()}
-- Net Buy Today: Rp{foreign_flow.get('ff_net_value_today', 0):,.0f}
+{data_flow_section}
 
 💰 Risk Levels:
 - Entry Price Suggestion: Rp{entry:,.0f}
@@ -408,7 +433,7 @@ Kamu WAJIB mengembalikan respon dalam format JSON yang valid. Jangan sertakan te
   "decision": "STRONG BUY",
   "confidence_score": 8,
   "chart_visual_analysis": "Penjelasan detail hasil analisis visual grafik (Maksimal 2-3 kalimat padat)",
-  "indicators_cross_check": "Penjelasan hasil cross-check indikator teknikal dan aliran dana (Maksimal 2-3 kalimat padat)",
+  "indicators_cross_check": "{cross_check_field_desc}",
   "ihsg_regime_impact": "Informasi/konteks kondisi pasar IHSG saat ini sebagai wawasan makro (Maksimal 1-2 kalimat)",
   "final_reasoning": "Rangkuman kesimpulan akhir analisis (Maksimal 2-3 kalimat yang sangat jelas)"
 }}
