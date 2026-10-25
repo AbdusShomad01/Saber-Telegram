@@ -10,6 +10,7 @@ sqlalchemy==2.0.36
 asyncpg==0.30.0
 psycopg2-binary==2.9.10
 alembic==1.14.1
+aiosqlite>=0.20.0
 
 # === Data & Analysis ===
 pandas==2.2.3
@@ -30,8 +31,9 @@ aiohttp==3.11.11
 anthropic==0.42.0
 google-genai>=1.0.0
 
-# === Image ===
+# === Image & Chart ===
 Pillow>=10.0.0
+matplotlib>=3.8.0
 
 # === Testing ===
 pytest==8.3.4
