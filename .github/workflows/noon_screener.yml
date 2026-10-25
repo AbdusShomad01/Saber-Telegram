@@ -35,6 +35,10 @@ jobs:
             echo "LLM_PROVIDER=gemini" >> .env
             echo "GOOGLE_SHEET_WEBHOOK_URL=${{ secrets.GOOGLE_SHEET_WEBHOOK_URL }}" >> .env
             echo "GOOGLE_SHEET_VIEW_URL=${{ secrets.GOOGLE_SHEET_VIEW_URL }}" >> .env
+            echo "SUPABASE_PROJECT_ID=${{ secrets.SUPABASE_PROJECT_ID }}" >> .env
+            echo "SUPABASE_API_KEY=${{ secrets.SUPABASE_API_KEY }}" >> .env
+            echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" >> .env
+            echo "GOAPI_KEY=${{ secrets.GOAPI_KEY }}" >> .env
             echo "DAY_TRADE_MODE=true" >> .env
             echo "CHART_INTERVAL=1d" >> .env
             echo "DATA_PROVIDER=yfinance" >> .env
