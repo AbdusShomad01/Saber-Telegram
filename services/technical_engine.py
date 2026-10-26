@@ -19,13 +19,15 @@ class TechnicalEngine:
     All indicators are deterministic — no LLM involvement.
     """
 
-    def __init__(self, df: pd.DataFrame):
+    def __init__(self, df: pd.DataFrame, ihsg_df: Optional[pd.DataFrame] = None):
         """
         Args:
             df: OHLCV DataFrame with columns [date, open, high, low, close, volume]
                 Must be sorted by date ascending.
+            ihsg_df: Optional IHSG OHLCV DataFrame for Beta computation.
         """
         self.df = df.copy()
+        self.ihsg_df = ihsg_df.copy() if ihsg_df is not None else None
         self._validate()
 
     def _validate(self):
@@ -388,11 +390,26 @@ class TechnicalEngine:
         vol_is_buying = vol_ratio >= 1.3 and is_bullish_candle
         vol_is_selling = vol_ratio >= 1.3 and is_bearish_candle
 
+        # 5-day volume percentage and label
+        vol_5d_pct = round((current_vol / avg_vol_5) * 100, 1) if avg_vol_5 > 0 else 100.0
+        if vol_5d_pct >= 200:
+            vol_5d_label = f"Sangat Tinggi ({vol_5d_pct:.0f}%) 🟢"
+        elif vol_5d_pct >= 120:
+            vol_5d_label = f"Tinggi ({vol_5d_pct:.0f}%) 🟢"
+        elif vol_5d_pct >= 80:
+            vol_5d_label = f"Normal ({vol_5d_pct:.0f}%) ⚪"
+        elif vol_5d_pct >= 40:
+            vol_5d_label = f"Rendah ({vol_5d_pct:.0f}%) 🟡"
+        else:
+            vol_5d_label = f"Sangat Rendah ({vol_5d_pct:.0f}%) 🔴"
+
         return {
             "volume_current": int(current_vol),
             "volume_avg_20": int(avg_vol_20),
             "volume_avg_5": int(avg_vol_5),
             "volume_ratio": round(vol_ratio, 2),
+            "volume_vs_5d_pct": vol_5d_pct,
+            "volume_5d_label": vol_5d_label,
             "volume_breakout": vol_breakout,           # >= 2x avg20
             "volume_dry_up": vol_dry,
             "volume_increasing": vol_increasing,
@@ -400,6 +417,7 @@ class TechnicalEngine:
             "volume_is_buying": vol_is_buying,
             "volume_is_selling": vol_is_selling,
         }
+
 
     # ------------------------------------------------------------------ #
     #  VWAP (Volume Weighted Average Price)
@@ -497,5 +515,72 @@ class TechnicalEngine:
         except Exception as e:
             logger.error(f"VWAP error: {e}")
 
+        try:
+            result.update(self.compute_beta_and_volatility())
+        except Exception as e:
+            logger.error(f"Beta and Volatility error: {e}")
+
         logger.info(f"Computed {len(result)} technical indicators")
         return result
+
+    # ------------------------------------------------------------------ #
+    #  Beta and Volatility Analysis
+    # ------------------------------------------------------------------ #
+
+    def compute_beta_and_volatility(self) -> Dict[str, Any]:
+        """Compute annualized volatility and beta relative to IHSG (^JKSE)."""
+        close = self.df["close"]
+        returns = close.pct_change().dropna()
+        if len(returns) >= 5 and returns.std() > 0:
+            ann_vol = float(returns.std() * np.sqrt(252) * 100)
+        else:
+            ann_vol = 0.0
+
+        beta = 1.0
+        if (
+            self.ihsg_df is not None
+            and len(self.ihsg_df) >= 10
+            and "date" in self.df.columns
+            and "date" in self.ihsg_df.columns
+        ):
+            try:
+                s_df = self.df[["date", "close"]].copy()
+                s_df["date"] = pd.to_datetime(s_df["date"]).dt.date
+                s_df["s_ret"] = s_df["close"].pct_change()
+
+                i_df = self.ihsg_df[["date", "close"]].copy()
+                i_df["date"] = pd.to_datetime(i_df["date"]).dt.date
+                i_df["i_ret"] = i_df["close"].pct_change()
+
+                merged = pd.merge(s_df, i_df, on="date").dropna()
+                if len(merged) >= 10 and merged["i_ret"].var() > 0:
+                    cov = merged["s_ret"].cov(merged["i_ret"])
+                    var = merged["i_ret"].var()
+                    beta = float(cov / var)
+                elif ann_vol > 0:
+                    beta = max(0.5, round(ann_vol / 43.0, 2))
+            except Exception as e:
+                logger.debug(f"Beta calculation error: {e}")
+                if ann_vol > 0:
+                    beta = max(0.5, round(ann_vol / 43.0, 2))
+        elif ann_vol > 0:
+            beta = max(0.5, round(ann_vol / 43.0, 2))
+
+        beta = round(beta, 2)
+        if beta >= 1.5:
+            beta_label = "Very High"
+        elif beta >= 1.1:
+            beta_label = "High"
+        elif beta >= 0.8:
+            beta_label = "Moderate"
+        elif beta > 0:
+            beta_label = "Low"
+        else:
+            beta_label = "Negative"
+
+        return {
+            "volatility": round(ann_vol, 1),
+            "beta": beta,
+            "beta_label": beta_label,
+        }
+

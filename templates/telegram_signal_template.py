@@ -28,42 +28,104 @@ CONFIDENCE_BAR = {
 def format_signal_message(signal_data: dict) -> str:
     """
     Format a signal into a Telegram-ready message.
-    Uses HTML parse mode for rich formatting.
+    Revamped according to user specifications.
     """
     ticker = signal_data.get("ticker", "???")
-    name = signal_data.get("name", "")
-    signal = signal_data.get("signal", "AVOID")
-    confidence = signal_data.get("confidence_score", 1)
-    confidence_label = signal_data.get("confidence_label", "LOW")
-    raw_score = signal_data.get("raw_score", 0)
-    sector = signal_data.get("sector", "")
+    signal = signal_data.get("signal", "WATCHLIST")
 
-    emoji = SIGNAL_EMOJI.get(signal, "⚪")
-    bar = CONFIDENCE_BAR.get(confidence, "░░░░░░░░░░")
+    # Syariah badge
+    from services.stock_universe_service import is_syariah_stock
+    is_syariah = signal_data.get("is_syariah")
+    if is_syariah is None:
+        is_syariah = is_syariah_stock(ticker)
+    syariah_badge = "🟢 SYARIAH" if is_syariah else "🔴 NON-SYARIAH"
 
-    entry = signal_data.get("entry_price", 0)
-    tp1 = signal_data.get("tp1", 0)
-    tp2 = signal_data.get("tp2", 0)
-    tp3 = signal_data.get("tp3", 0)
-    sl_atr = signal_data.get("stop_loss_atr", 0)
-    sl_mod = signal_data.get("stop_loss_moderate", 0)
-    sl_cons = signal_data.get("stop_loss_conservative", 0)
-    rr = signal_data.get("risk_reward_ratio", 0)
+    # Prices & Targets
+    entry = float(signal_data.get("entry_price") or 0)
+    tp1 = float(signal_data.get("tp1") or 0)
+    tp1_pct = ((tp1 - entry) / entry * 100) if (entry > 0 and tp1 > 0) else 0.0
+    tp1_sign = "+" if tp1_pct >= 0 else ""
 
-    # Category scores
-    cat_scores = signal_data.get("category_scores", {})
-    trend = cat_scores.get("trend_momentum", 0)
-    vol = cat_scores.get("volume_liquidity", 0)
-    pattern = cat_scores.get("pattern", 0)
-    sr = cat_scores.get("support_resistance", 0)
-    bandar = cat_scores.get("bandarmology", 0)
-    ff = cat_scores.get("foreign_flow", 0)
-    gap = cat_scores.get("gap_analysis", 0)
-    sector_corr = cat_scores.get("sector_correlation", 0)
-    risk = cat_scores.get("risk_reward", 0)
+    # Stop Loss
+    sl_atr = float(signal_data.get("stop_loss_atr") or 0)
+    sl_atr_pct = ((sl_atr - entry) / entry * 100) if (entry > 0 and sl_atr > 0) else 0.0
 
-    # Mode detection
-    is_pure_technical = bool(signal_data.get("pure_technical", False) or signal_data.get("interval") in ["60m", "15m", "1h", "30m"])
+    # Moderat (-5%) and Konservatif (-3%)
+    from services.risk_engine import RiskEngine
+    risk_eng = RiskEngine()
+    sl_mod = float(signal_data.get("stop_loss_moderate") or risk_eng._round_tick(entry * 0.95))
+    sl_cons = float(signal_data.get("stop_loss_conservative") or risk_eng._round_tick(entry * 0.97))
+
+    # Technical
+    tech = signal_data.get("technical", {})
+
+    # MACD
+    macd = float(tech.get("macd") or 0.0)
+    macd_sig = float(tech.get("macd_signal") or 0.0)
+    is_macd_bullish = macd > macd_sig
+    macd_status = "🟢 Bullish" if is_macd_bullish else "🔴 Bearish"
+
+    # RSI (14)
+    rsi = float(tech.get("rsi") or 50.0)
+    if rsi >= 70:
+        rsi_status = "🔴 Overbought"
+    elif rsi >= 60:
+        rsi_status = "🟡 Overbought"
+    elif rsi >= 50:
+        rsi_status = "🟢 Bullish"
+    elif rsi >= 40:
+        rsi_status = "🟡 Neutral"
+    elif rsi >= 30:
+        rsi_status = "🟡 Oversold"
+    else:
+        rsi_status = "🟢 Oversold"
+
+    # Volume (vs rata2 5hr)
+    vol_5d_label = tech.get("volume_5d_label")
+    if not vol_5d_label:
+        current_vol = float(tech.get("volume_current") or 0)
+        avg_vol_5 = float(tech.get("volume_avg_5") or 0)
+        vol_pct = (current_vol / avg_vol_5 * 100) if avg_vol_5 > 0 else 100.0
+        if vol_pct >= 200:
+            vol_5d_label = f"Sangat Tinggi ({vol_pct:.0f}%) 🟢"
+        elif vol_pct >= 120:
+            vol_5d_label = f"Tinggi ({vol_pct:.0f}%) 🟢"
+        elif vol_pct >= 80:
+            vol_5d_label = f"Normal ({vol_pct:.0f}%) ⚪"
+        elif vol_pct >= 40:
+            vol_5d_label = f"Rendah ({vol_pct:.0f}%) 🟡"
+        else:
+            vol_5d_label = f"Sangat Rendah ({vol_pct:.0f}%) 🔴"
+
+    # EMA 20/50
+    ema20 = float(tech.get("ema_20") or 0.0)
+    ema50 = float(tech.get("ema_50") or 0.0)
+    ema_status = "🟢 Bullish" if (ema20 >= ema50 and ema20 > 0) else "🔴 Bearish"
+
+    # VWAP
+    vwap = float(tech.get("vwap") or 0.0)
+    price_above_vwap = tech.get("price_above_vwap")
+    if price_above_vwap is None:
+        price_above_vwap = entry >= vwap if vwap > 0 else True
+    vwap_status = "🟢 Above" if price_above_vwap else "🔴 Below"
+
+    # ADX
+    adx = float(tech.get("adx") or 0.0)
+    if adx >= 40:
+        adx_status = "🟢 Very Strong"
+    elif adx >= 25:
+        adx_status = "🟢 Strong"
+    elif adx >= 20:
+        adx_status = "🟡 Moderate"
+    else:
+        adx_status = "⚪ Weak"
+
+    # BB
+    bb_lower = float(tech.get("bb_lower") or 0.0)
+    bb_upper = float(tech.get("bb_upper") or 0.0)
+
+    # ATR
+    atr = float(tech.get("atr") or 0.0)
 
     # Patterns
     patterns = signal_data.get("patterns", {})
@@ -71,230 +133,99 @@ def format_signal_message(signal_data: dict) -> str:
     candles = signal_data.get("candles", {})
     candle_list = candles.get("candle_patterns", [])
 
+    chart_pattern_str = f"{' + '.join(pattern_list)} ⚪" if pattern_list else "Konsolidasi / Netral ⚪"
+    candle_pattern_str = f"{' + '.join(candle_list)} ⚪" if candle_list else "Netral ⚪"
+
     # Bandarmology
     bandar_data = signal_data.get("bandarmology", {})
-    bandar_signal = bandar_data.get("bandar_signal", "neutral")
+    is_pure_tech = bool(signal_data.get("pure_technical", False))
+    is_real = bandar_data.get("is_real_data", False)
 
-    # Foreign flow
-    ff_data = signal_data.get("foreign_flow", {})
-    ff_signal = ff_data.get("ff_signal", "neutral")
+    if is_pure_tech or not is_real or not bandar_data:
+        bandar_str = "Data sedang maintenance"
+    else:
+        bandar_sig = bandar_data.get("bandar_signal", "neutral").replace("_", " ").title()
+        top_buyers = bandar_data.get("top_buyers", [])
+        top_sellers = bandar_data.get("top_sellers", [])
+        if top_buyers and top_sellers:
+            b_str = ", ".join(top_buyers[:2])
+            s_str = ", ".join(top_sellers[::-1][:2])
+            bandar_str = f"{bandar_sig} (Top Buyer: {b_str} | Top Seller: {s_str})"
+        elif bandar_sig and bandar_sig != "Neutral":
+            bandar_str = bandar_sig
+        else:
+            bandar_str = "Data sedang maintenance"
 
-    # News
-    news = signal_data.get("news", {})
-    headlines = news.get("headlines", [])
+    # Beta & Volatilitas
+    beta = float(tech.get("beta") or signal_data.get("beta") or 1.0)
+    beta_label = tech.get("beta_label") or signal_data.get("beta_label")
+    if not beta_label:
+        if beta >= 1.5:
+            beta_label = "Very High"
+        elif beta >= 1.1:
+            beta_label = "High"
+        elif beta >= 0.8:
+            beta_label = "Moderate"
+        elif beta > 0:
+            beta_label = "Low"
+        else:
+            beta_label = "Negative"
+    volatility = float(tech.get("volatility") or signal_data.get("volatility") or 0.0)
 
-    # Analyst opinion
-    opinion = signal_data.get("analyst_opinion", "")
+    # Analyst Opinion
+    opinion = signal_data.get("analyst_opinion", "").strip()
     if opinion and len(opinion) > 3200:
         opinion = opinion[:3197] + "..."
 
-    msg = f"""
-{emoji} <b>SIGNAL: {signal}</b> {emoji}
-━━━━━━━━━━━━━━━━━━━━━━
+    # News Headlines
+    news = signal_data.get("news", {})
+    headlines = news.get("headlines", [])
 
-📌 <b>{ticker}</b> — {name}
-🏢 Sektor: {sector}"""
-
-    if is_pure_technical:
-        msg += "\n⚡ Mode: <b>Pure Technical (Noon Intraday)</b>"
-
-    ihsg = signal_data.get("ihsg_regime")
-    if ihsg:
-        regime_emoji = "🟢" if ihsg.get("regime") == "BULLISH" else ("🔴" if ihsg.get("regime") == "BEARISH" else "🟡")
-        msg += f"\n🌍 IHSG Regime: <b>{regime_emoji} {ihsg.get('regime')}</b>"
-
-    # Multi-Timeframe daily trend (if available)
-    technical = signal_data.get("technical", {})
-    daily_trend = technical.get("daily_trend_bias")
-    if daily_trend:
-        dtf_emoji = "🟢" if daily_trend == "bullish" else ("🔴" if daily_trend == "bearish" else "🟡")
-        msg += f"\n📊 Daily Trend: <b>{dtf_emoji} {daily_trend.upper()}</b>"
-
-    msg += f"""
-📊 Score: <b>{raw_score}/100</b>
-🎯 Confidence: <b>{confidence}/10 ({confidence_label})</b>
-{bar}"""
-
-    # Fibonacci levels (for WATCHLIST)
-    fib_levels = signal_data.get("fib_levels", {})
-
-    if signal in ("BUY", "STRONG BUY", "WATCHLIST"):
-        if signal == "WATCHLIST" and fib_levels:
-            # Display Fibonacci-based entry & TP for WATCHLIST
-            swing_low  = fib_levels.get("swing_low", 0)
-            swing_high = fib_levels.get("swing_high", 0)
-            fib_0382   = fib_levels.get("fib_0382", 0)
-            fib_05     = fib_levels.get("fib_05", 0)
-            fib_0618   = fib_levels.get("fib_0618", entry)   # Entry
-            fib_1618   = fib_levels.get("fib_1618", tp1)     # TP
-            fib_2618   = fib_levels.get("fib_2618", 0)
-            
-            is_below = fib_levels.get("is_below_fib", False)
-            
-            msg += f"""
-
-📌 <b>Fibonacci Analysis (WATCHLIST)</b>
-📐 Swing Low : <code>Rp{swing_low:,.0f}</code>
-📐 Swing High: <code>Rp{swing_high:,.0f}</code>"""
-
-            if is_below:
-                entry_discount = fib_levels.get("entry_discount", entry)
-                sl_discount = fib_levels.get("sl_discount", sl_cons)
-                entry_confirm = fib_levels.get("entry_confirm", fib_0618)
-                sl_confirm = fib_levels.get("sl_confirm", sl_cons)
-                
-                rr_discount = round(abs(fib_1618 - entry_discount) / abs(entry_discount - sl_discount), 2) if (entry_discount - sl_discount) > 0 else 0
-                rr_confirm = round(abs(fib_1618 - entry_confirm) / abs(entry_confirm - sl_confirm), 2) if (entry_confirm - sl_confirm) > 0 else 0
-                
-                msg += f"""
-
-💡 Harga saat ini (Rp{entry_discount:,.0f}) sudah di bawah Fib 0.618 (Rp{entry_confirm:,.0f}). Pilih opsi entry berikut:
-
-🛒 <b>Opsi 1: Buy on Weakness (Discount)</b>
-├─ Entry (Harga Sekarang): <code>Rp{entry_discount:,.0f}</code>
-├─ Stop Loss            : <code>Rp{sl_discount:,.0f}</code>
-└─ R:R Ratio            : <code>{rr_discount:.2f}</code>
-
-🚀 <b>Opsi 2: Buy on Strength (Konfirmasi)</b>
-├─ Entry (Trigger Rebound): <code>Rp{entry_confirm:,.0f}</code>
-├─ Stop Loss            : <code>Rp{sl_confirm:,.0f}</code>
-└─ R:R Ratio            : <code>{rr_confirm:.2f}</code>
-
-🎯 <b>Target Penjualan (TP)</b>
-├─ TP1 (Fib 1.618)   : <code>Rp{fib_1618:,.0f}</code>
-└─ TP2 (Fib 2.618)   : <code>Rp{fib_2618:,.0f}</code>"""
-            else:
-                msg += f"""
-
-💰 <b>Risk Management — Fib Based</b>
-├─ Entry (Fib 0.618) : <code>Rp{fib_0618:,.0f}</code>
-├─ Fib 0.5          : <code>Rp{fib_05:,.0f}</code>
-├─ Fib 0.382        : <code>Rp{fib_0382:,.0f}</code>
-├─ TP (Fib 1.618)   : <code>Rp{fib_1618:,.0f}</code>
-├─ TP2 (Fib 2.618)  : <code>Rp{fib_2618:,.0f}</code>
-├─ SL ATR           : <code>Rp{sl_atr:,.0f}</code>
-├─ SL Moderat       : <code>Rp{sl_mod:,.0f}</code>
-└─ R:R Ratio        : <code>{rr:.2f}</code>"""
-        else:
-            # BUY / STRONG BUY: tampilkan TP1/TP2/TP3 dengan panduan partial exit
-            tp1_str = f"Rp{tp1:,.0f}" if tp1 else "-"
-            tp2_str = f"Rp{tp2:,.0f}" if tp2 else "-"
-            tp3_str = f"Rp{tp3:,.0f}" if tp3 else "-"
-            msg += f"""
-
-💰 <b>Risk Management</b>
-├─ Entry        : <code>Rp{entry:,.0f}</code>
-├─ TP1 (exit 50%): <code>{tp1_str}</code>
-├─ TP2 (exit 30%): <code>{tp2_str}</code>
-├─ TP3 (hold 20%): <code>{tp3_str}</code>
-├─ SL ATR       : <code>Rp{sl_atr:,.0f}</code>
-├─ SL Moderat   : <code>Rp{sl_mod:,.0f}</code>
-├─ SL Konservatif: <code>Rp{sl_cons:,.0f}</code>
-└─ R:R Ratio    : <code>{rr:.2f}</code>"""
-    else:
-        msg += f"""
-
-⚠️ <b>Sinyal {signal}:</b> Tidak ada rekomendasi beli / rencana perdagangan. Saham dinilai kurang mendukung atau berisiko tinggi saat ini."""
-
-    if is_pure_technical:
-        msg += f"""
-
-📈 <b>Score Breakdown (Pure Technical)</b>
-├─ Trend & Momentum   : {trend:.0f}/30
-├─ Volume & Liquidity : {vol:.0f}/25
-├─ Support & Resistance: {sr:.0f}/20
-├─ Pattern & Candle   : {pattern:.0f}/15
-├─ Gap Analysis       : {gap:.0f}/5
-└─ Sector Correlation : {sector_corr:.0f}/5"""
-    else:
-        msg += f"""
-
-📈 <b>Score Breakdown</b>
-├─ Trend & Momentum   : {trend:.0f}/20
-├─ Volume & Liquidity : {vol:.0f}/20
-├─ Support & Resistance: {sr:.0f}/13
-├─ Pattern & Candle   : {pattern:.0f}/10
-├─ Gap Analysis       : {gap:.0f}/4
-├─ Sector Correlation : {sector_corr:.0f}/4
-├─ Bandarmology       : {bandar:.0f}/17
-└─ Foreign Flow       : {ff:.0f}/12"""
-
-    if pattern_list:
-        msg += f"\n\n🔍 <b>Chart Patterns:</b> {', '.join(pattern_list)}"
-
-    if candle_list:
-        msg += f"\n🕯 <b>Candle Patterns:</b> {', '.join(candle_list)}"
-
-    if not is_pure_technical:
-        top_buyers = bandar_data.get("top_buyers", [])
-        top_sellers = bandar_data.get("top_sellers", [])
-        top_buyers_lots = bandar_data.get("top_buyers_lots", {})
-        top_sellers_lots = bandar_data.get("top_sellers_lots", {})
-
-        buyers_2 = top_buyers[:2]
-        sellers_2 = top_sellers[::-1][:2]
-
-        msg += f"\n\n🏦 <b>Bandarmology:</b> {bandar_signal.replace('_', ' ').title()}"
-        if buyers_2:
-            msg += "\n\n<b>Top Buyer:</b>"
-            for b in buyers_2:
-                lot = top_buyers_lots.get(b)
-                if lot is not None and lot > 0:
-                    msg += f"\n- {b} : {lot:,} lot"
-                else:
-                    msg += f"\n- {b}"
-        if sellers_2:
-            msg += "\n\n<b>Top Seller:</b>"
-            for s in sellers_2:
-                lot = top_sellers_lots.get(s)
-                if lot is not None and lot > 0:
-                    msg += f"\n- {s} : {lot:,} lot"
-                else:
-                    msg += f"\n- {s}"
-            
-        msg += f"\n\n🌐 <b>Foreign Flow:</b> {ff_signal.replace('_', ' ').title()}"
-    else:
-        # Tampilkan key technical indicators jika pure technical
-        technical = signal_data.get("technical", {})
-        rsi = technical.get("rsi")
-        adx = technical.get("adx")
-        vol_ratio = technical.get("volume_spike_ratio") or technical.get("vol_20d_ratio") or technical.get("volume_vs_ma20")
-        vwap = technical.get("vwap")
-        price_above_vwap = technical.get("price_above_vwap")
-        ema_bullish = technical.get("ema_alignment_bullish")
-
-        tech_metrics = []
-        if rsi is not None:
-            rsi_desc = "Overbought" if rsi > 70 else ("Oversold" if rsi < 30 else "Bullish Momentum" if rsi > 50 else "Bearish Momentum")
-            tech_metrics.append(f"├─ RSI (14)       : <code>{rsi:.1f}</code> ({rsi_desc})")
-        if adx is not None:
-            adx_desc = "Strong Trend" if adx >= 25 else "Consolidation"
-            tech_metrics.append(f"├─ ADX (Trend)    : <code>{adx:.1f}</code> ({adx_desc})")
-        if vol_ratio is not None:
-            tech_metrics.append(f"├─ Volume Spike   : <code>{vol_ratio:.1f}x MA20</code>")
-        if vwap is not None and vwap > 0:
-            vwap_pos = "Above" if price_above_vwap else "Below"
-            tech_metrics.append(f"├─ VWAP           : <code>Rp{vwap:,.0f}</code> ({vwap_pos})")
-        if ema_bullish is not None:
-            ema_str = "Bullish (EMA10>20>50)" if ema_bullish else "Consolidation / Mixed"
-            tech_metrics.append(f"└─ EMA Alignment  : <b>{ema_str}</b>")
-
-        if tech_metrics:
-            msg += "\n\n⚡ <b>Key Technical Indicators:</b>\n" + "\n".join(tech_metrics)
-
-    if headlines:
-        msg += "\n\n📰 <b>Berita Terkait:</b>"
-        for h in headlines[:3]:
-            msg += f"\n• {h}"
+    lines = [
+        f"Saham: {ticker} {syariah_badge}",
+        f"Signal: {signal}",
+        "",
+        "",
+        f"💵 Entry Price: Rp{entry:,.0f}",
+        f"🎯 TP1: Rp{tp1:,.0f} ({tp1_sign}{tp1_pct:.1f}%)",
+        "",
+        "Stop Loss:",
+        f"Default (ATR): Rp{sl_atr:,.0f} ({sl_atr_pct:.1f}%)",
+        f"Moderat (-5%): Rp{sl_mod:,.0f}",
+        f"Konservatif (-3%): Rp{sl_cons:,.0f}",
+        "",
+        "📊 Technical:",
+        f"- MACD: {macd:.2f} (Sig: {macd_sig:.2f}) {macd_status}",
+        f"- RSI (14): {rsi:.2f} {rsi_status}",
+        f"- Volume (vs rata2 5hr): {vol_5d_label}",
+        f"- EMA 20/50: Rp{ema20:,.0f} / Rp{ema50:,.0f} {ema_status}",
+        f"- VWAP: Rp{vwap:,.0f} {vwap_status}",
+        f"- ADX: {adx:.2f} {adx_status}",
+        f"- BB: [Rp{bb_lower:,.0f} - Rp{bb_upper:,.0f}]",
+        f"- ATR: Rp{atr:,.0f}",
+        "",
+        "👁️ Pattern:",
+        f"- Chart: {chart_pattern_str}",
+        f"- Candle: {candle_pattern_str}",
+        "",
+        f"🏦 Bandarmology: {bandar_str}",
+        "",
+        f"📈 Beta: {beta:.2f} ({beta_label}) | Volatilitas: {volatility:.0f}%",
+    ]
 
     if opinion:
-        msg += f"\n\n💡 <b>Opini Analis:</b>\n{opinion}"
+        lines.append("")
+        lines.append("💡 Analyst Opinion:")
+        lines.append(opinion)
 
-    msg += "\n\n━━━━━━━━━━━━━━━━━━━━━━"
-    msg += "\n⚠️ <i>Disclaimer: Bukan ajakan beli/jual. DYOR.</i>"
-    msg += "\n🤖 <i>Saber Trader AI Signal Bot</i>"
+    if headlines:
+        lines.append("")
+        lines.append("📰 Berita Terkait:")
+        for h in headlines[:3]:
+            lines.append(f"• {h}")
 
-    return msg.strip()
+    return "\n".join(lines).strip()
+
 
 
 def format_scan_summary(signals: list) -> str:

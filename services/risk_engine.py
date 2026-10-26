@@ -74,14 +74,11 @@ class RiskEngine:
         tp2 = entry + (3.5 * atr)
         tp3 = entry + (5.5 * atr)
 
-        # SL sedikit diperlonggar: conservative 1.2x (dari 1.0x) agar tidak prematur kena stop
-        sl_atr = entry - (1.5 * atr)
-        sl_moderate = entry - (2.0 * atr)
-        sl_conservative = entry - (1.2 * atr)
+        # SL levels: Default ATR, Moderat (-5%), Konservatif (-3%)
+        sl_atr = entry - (3.0 * atr if atr < 5 else 2.0 * atr)
+        sl_moderate = entry * 0.95
+        sl_conservative = entry * 0.97
 
-        # If support is known, use it for conservative SL
-        if support and support < entry:
-            sl_conservative = max(sl_conservative, support * 0.99)
 
         # Round all to IDX tick sizes
         entry = self._round_tick(entry)
@@ -267,15 +264,11 @@ class RiskEngine:
             resistance=resistance,
         )
 
-        # --- Cap stop loss maksimum 4% dari entry (diturunkan dari 6% untuk memperkecil average loss)
-        max_sl_distance = close * 0.04
-        if (close - levels.stop_loss_conservative) > max_sl_distance:
-            levels.stop_loss_conservative = self._round_tick(close - max_sl_distance)
-            logger.debug(f"[RiskEngine] SL capped to 4% max: {levels.stop_loss_conservative:.0f}")
-        if (close - levels.stop_loss_atr) > max_sl_distance:
-            levels.stop_loss_atr = self._round_tick(close - max_sl_distance)
-        if (close - levels.stop_loss_moderate) > max_sl_distance:
-            levels.stop_loss_moderate = self._round_tick(close - max_sl_distance * 1.2)
+        # SL levels: Default ATR, Moderat (-5%), Konservatif (-3%)
+        levels.stop_loss_moderate = self._round_tick(close * 0.95)
+        levels.stop_loss_conservative = self._round_tick(close * 0.97)
+        levels.stop_loss_atr = self._round_tick(close - (3.0 * atr if atr < 5 else 2.0 * atr))
+
 
         # Recompute R:R setelah cap
         risk = abs(levels.entry_price - levels.stop_loss_conservative)

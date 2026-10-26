@@ -137,7 +137,9 @@ DEFAULT_STOCK_UNIVERSE = [
     {"ticker": "SSIA", "name": "Surya Semesta Internusa Tbk", "sector": "Infrastructures", "subsector": "Construction", "board": "Utama"},
     {"ticker": "TAPG", "name": "Triputra Agro Persada Tbk", "sector": "Consumer Non-Cyclicals", "subsector": "Plantations", "board": "Utama"},
     {"ticker": "WIFI", "name": "Solusi Sinergi Digital Tbk", "sector": "Technology", "subsector": "IT Services", "board": "Utama"},
+    {"ticker": "GZCO", "name": "Gozco Plantations Tbk", "sector": "Consumer Non-Cyclicals", "subsector": "Plantations", "board": "Pengembangan"},
 ]
+
 
 
 def get_stock_universe() -> List[Dict]:
@@ -183,3 +185,43 @@ def get_all_sectors() -> List[str]:
 def validate_ticker(ticker: str) -> bool:
     """Validate if ticker exists or is a valid IDX format."""
     return get_stock_by_ticker(ticker) is not None
+
+
+# Known non-syariah stocks on IDX (conventional finance/banks, tobacco, alcohol)
+NON_SYARIAH_TICKERS = {
+    # Conventional Banks
+    "BBCA", "BBRI", "BMRI", "BBNI", "BBTN", "BDMN", "BNGA", "BNII", "BBHI",
+    "MAYA", "BABP", "MEGA", "AGRO", "NOBU", "BACA", "BCIC", "BJBR", "BJTM",
+    "BNLI", "PNBN", "MCOR", "AMAR", "ARTO", "BNBA", "BSWD", "DNAR", "INPC",
+    "MASB", "NISP", "SDRA", "BVIC", "BGTG", "BEKS",
+    # Tobacco
+    "HMSP", "GGRM", "WIIM", "ITIC",
+    # Alcoholic Beverages
+    "MLBI", "DLTA",
+    # Conventional Finance & Insurance
+    "BFIN", "CFIN", "WOMF", "MFIN", "ADMF", "PNLF", "SMMA", "SRTG",
+}
+
+
+def is_syariah_stock(ticker: str) -> bool:
+    """
+    Check if ticker is Syariah compliant (Daftar Efek Syariah / ISSI constituent).
+    By default in IDX, non-financial/non-tobacco/non-alcohol stocks are Syariah.
+    """
+    if not ticker:
+        return True
+    ticker_clean = ticker.upper().strip()
+    if ticker_clean in NON_SYARIAH_TICKERS:
+        return False
+    stock_info = get_stock_by_ticker(ticker_clean)
+    if stock_info:
+        subsector = (stock_info.get("subsector") or "").lower()
+        sector = (stock_info.get("sector") or "").lower()
+        if "bank" in subsector and ticker_clean not in {"BRIS", "BTPS", "PNBS"}:
+            return False
+        if "tobacco" in subsector or "rokok" in subsector:
+            return False
+        if "alcohol" in subsector or "liquor" in subsector:
+            return False
+    return True
+

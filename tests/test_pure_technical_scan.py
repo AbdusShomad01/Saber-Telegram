@@ -27,11 +27,13 @@ async def main():
     sig_dict = scanner.signal_to_dict(sig)
     msg = format_signal_message(sig_dict)
     
-    assert "Pure Technical" in msg, "Mode: Pure Technical should be in message"
-    assert "Score Breakdown (Pure Technical)" in msg, "Score Breakdown (Pure Technical) should be in message"
-    assert "Bandarmology" not in msg, "Bandarmology should not be mentioned in message"
-    assert "Foreign Flow" not in msg, "Foreign Flow should not be mentioned in message"
-    assert "Key Technical Indicators" in msg, "Key Technical Indicators should be in message"
+    assert "Saham: BBCA 🔴 NON-SYARIAH" in msg
+    assert "Signal:" in msg
+    assert "📊 Technical:" in msg
+    assert "- MACD:" in msg
+    assert "- RSI (14):" in msg
+    assert "🏦 Bandarmology: Data sedang maintenance" in msg
+    assert "📈 Beta:" in msg
 
     print("\n--- FORMATTED MESSAGE PREVIEW ---")
     # Clean print without console encoding crash

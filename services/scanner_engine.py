@@ -30,7 +30,7 @@ from services.news_engine import NewsEngine
 from services.llm_engine import LLMEngine
 from services.regime_engine import RegimeEngine
 from services.chart_service import ChartService
-from services.stock_universe_service import get_stock_universe, get_stock_by_ticker
+from services.stock_universe_service import get_stock_universe, get_stock_by_ticker, is_syariah_stock
 from services.idx_full_universe_service import get_full_idx_universe, is_fca_stock
 from database.models import Signal
 from app.config import get_settings
@@ -69,6 +69,8 @@ class SignalOutput:
     fib_levels: Optional[Dict[str, Any]] = None
     interval: str = ""
     pure_technical: bool = False
+    is_syariah: Optional[bool] = None
+
 
 
 class ScannerEngine:
@@ -283,7 +285,15 @@ class ScannerEngine:
                 if interval != "1d":
                     daily_trend = self._fetch_daily_trend(ticker)
 
-            technical = TechnicalEngine(ohlcv).compute_all()
+            # Attempt to fetch IHSG data for sector correlation & Beta calculation
+            try:
+                ihsg_df = self.data_provider.get_ohlcv("^JKSE", period_days=period_days, interval=interval)
+                if ihsg_df.empty or len(ihsg_df) < 10:
+                    ihsg_df = None
+            except Exception:
+                ihsg_df = None
+
+            technical = TechnicalEngine(ohlcv, ihsg_df=ihsg_df).compute_all()
             patterns = PatternEngine(ohlcv).detect_all()
             candles = CandleEngine(ohlcv).detect_all()
             
@@ -295,16 +305,8 @@ class ScannerEngine:
                 foreign_flow = ForeignFlowEngine(ff_data).analyze()
                 
             gap_analysis = GapEngine(ohlcv).analyze()
-
-            # Attempt to fetch IHSG data for sector correlation (will hit cache if already fetched)
-            try:
-                ihsg_df = self.data_provider.get_ohlcv("^JKSE", period_days=period_days, interval=interval)
-                if ihsg_df.empty or len(ihsg_df) < 10:
-                    ihsg_df = None
-            except Exception:
-                ihsg_df = None
-
             sector_correlation = SectorCorrelationEngine(ohlcv, ihsg_df).analyze()
+
 
             # Merge daily trend data into technical dict for scoring
             if daily_trend:
@@ -379,13 +381,15 @@ class ScannerEngine:
                 elif final_confidence <= 3:
                     conf_label = "LOW"
 
-                cross_check_title = "Cross-Check Indikator Teknikal:" if pure_technical else "Cross-Check Indikator & Aliran Dana:"
-                opinion = (
-                    f"📈 **Analisis Visual Grafik:**\n{strategy_result.get('chart_visual_analysis', '')}\n\n"
-                    f"🏦 **{cross_check_title}**\n{strategy_result.get('indicators_cross_check', '')}\n\n"
-                    f"🌍 **Regime IHSG ({ihsg_regime['regime']}):**\n{strategy_result.get('ihsg_regime_impact', '')}\n\n"
-                    f"💡 **Keputusan & Alasan:**\n{strategy_result.get('final_reasoning', '')}"
-                )
+                # Synthesize cohesive analyst opinion narrative
+                opinion_parts = []
+                if strategy_result.get("chart_visual_analysis"):
+                    opinion_parts.append(strategy_result["chart_visual_analysis"].strip())
+                if strategy_result.get("indicators_cross_check"):
+                    opinion_parts.append(strategy_result["indicators_cross_check"].strip())
+                if strategy_result.get("final_reasoning"):
+                    opinion_parts.append(strategy_result["final_reasoning"].strip())
+                opinion = " ".join(opinion_parts) if opinion_parts else strategy_result.get("final_reasoning", "")
             elif run_llm:
                 logger.warning(f"[{ticker}] Strategy Agent failed. Falling back to deterministic scoring.")
                 final_signal = score_result.signal
@@ -431,7 +435,9 @@ class ScannerEngine:
                 fib_levels=risk_levels.fib_levels,
                 interval=interval,
                 pure_technical=pure_technical,
+                is_syariah=is_syariah_stock(ticker),
             )
+
 
             # Save to Database
             if run_llm:
@@ -737,4 +743,9 @@ class ScannerEngine:
             "fib_levels": signal.fib_levels,
             "interval": signal.interval,
             "pure_technical": getattr(signal, "pure_technical", False),
+            "is_syariah": getattr(signal, "is_syariah", None) if getattr(signal, "is_syariah", None) is not None else is_syariah_stock(signal.ticker),
+            "beta": signal.technical_summary.get("beta", 1.0),
+            "beta_label": signal.technical_summary.get("beta_label", "Moderate"),
+            "volatility": signal.technical_summary.get("volatility", 0.0),
         }
+
