@@ -36,74 +36,21 @@ class DataProviderService:
     In development/testing: returns synthetic mock data.
     """
 
-    _current_key_index = 0
-    _last_exhausted_time = None
     _ohlcv_cache = {}
+
+    # Broker Category Definitions (per IDX classification)
+    SMART_MONEY_BROKERS = {"CC", "BK", "KZ", "AK", "AG", "RX"}  # SM
+    FOREIGN_BROKERS = {"AK", "BK", "KZ", "RX", "AG", "YU"}      # FG (Foreign)
+    DOMESTIC_INST = {"NI", "ZP", "LG", "MG", "OD", "SQ", "DX", "GR", "CP", "TP", "EP", "IF", "BB"}  # DI
+    RETAIL_BROKERS = {"XL", "PD", "YP", "XC", "KK"}             # RT
 
     def __init__(self, provider: Optional[str] = None):
         self.provider = provider or settings.DATA_PROVIDER
-        goapi_key_str = settings.GOAPI_KEY or ""
-        self.goapi_keys = [k.strip() for k in goapi_key_str.split(",") if k.strip()]
         self.supabase_project_id = getattr(settings, "SUPABASE_PROJECT_ID", "")
         self.supabase_key = getattr(settings, "SUPABASE_API_KEY", "")
         self.supabase_url = getattr(settings, "SUPABASE_URL", "")
         if not self.supabase_url and self.supabase_project_id:
             self.supabase_url = f"https://{self.supabase_project_id}.supabase.co"
-
-    def _make_goapi_request(self, url: str, params: dict) -> dict:
-        """
-        Makes a request to GoAPI with automatic key rotation on failure (e.g. 429, 403, 401).
-        """
-        import httpx
-        import time
-
-        if DataProviderService._last_exhausted_time and (time.time() - DataProviderService._last_exhausted_time < 300):
-            raise RuntimeError("GoAPI previously failed or ran out of quota recently. Skipping to prevent delay.")
-
-        if not self.goapi_keys:
-            raise ValueError("No GoAPI keys configured.")
-
-        num_keys = len(self.goapi_keys)
-        for attempt in range(num_keys):
-            active_key = self.goapi_keys[DataProviderService._current_key_index]
-            headers = {
-                "X-API-KEY": active_key,
-                "Accept": "application/json"
-            }
-            try:
-                with httpx.Client(timeout=10.0) as client:
-                    resp = client.get(url, params=params, headers=headers)
-                    
-                    if resp.status_code in [401, 403, 429]:
-                        logger.warning(
-                            f"GoAPI Key index {DataProviderService._current_key_index} failed with status {resp.status_code}. "
-                            "Rotating to next key..."
-                        )
-                        DataProviderService._current_key_index = (DataProviderService._current_key_index + 1) % num_keys
-                        continue
-                    
-                    resp.raise_for_status()
-                    return resp.json()
-            except httpx.HTTPStatusError as hse:
-                if hse.response.status_code in [401, 403, 429]:
-                    logger.warning(
-                        f"GoAPI HTTPStatusError {hse.response.status_code} with key index {DataProviderService._current_key_index}. "
-                        "Rotating key..."
-                    )
-                    DataProviderService._current_key_index = (DataProviderService._current_key_index + 1) % num_keys
-                    continue
-                else:
-                    raise hse
-            except Exception as e:
-                logger.warning(
-                    f"GoAPI request error with key index {DataProviderService._current_key_index}: {e}. "
-                    "Rotating key..."
-                )
-                DataProviderService._current_key_index = (DataProviderService._current_key_index + 1) % num_keys
-                continue
-
-        DataProviderService._last_exhausted_time = time.time()
-        raise RuntimeError("All configured GoAPI keys failed or ran out of quota.")
 
     # ------------------------------------------------------------------ #
     #  OHLCV
@@ -344,15 +291,13 @@ class DataProviderService:
             except Exception as e:
                 logger.error(f"Supabase broker summary failed for {ticker}: {e}.")
 
-        # 2. GoAPI (Fallback)
-        if self.goapi_keys:
-            try:
-                return self._fetch_goapi_broker_summary(ticker, target_date, days)
-            except Exception as e:
-                logger.error(f"GoAPI broker summary failed for {ticker}: {e}. Falling back to mock.")
+        # 2. SQLite Cache Check
+        cached_df = self._get_cached_broker_summary(ticker, target_date)
+        if cached_df is not None and not cached_df.empty:
+            return cached_df
 
         if self.provider in ("yfinance", "api"):
-            logger.warning("Broker summary not available via yfinance and Supabase/GOAPI_KEY not set — using mock")
+            logger.warning(f"Broker summary not available via Supabase for {ticker} — using mock fallback")
 
         return self._generate_mock_broker_summary(ticker, target_date, days)
 
@@ -530,139 +475,6 @@ class DataProviderService:
         return df
 
 
-    def _fetch_goapi_broker_summary(self, ticker: str, target_date: date, days: int) -> pd.DataFrame:
-        """Fetch broker summary from GoAPI."""
-        if hasattr(target_date, "date"):
-            target_date = getattr(target_date, "date")()
-        elif isinstance(target_date, str):
-            target_date = pd.to_datetime(target_date).date()
-            
-        import httpx
-        from datetime import datetime
-        import pytz
-        import os
-        
-        # GoAPI broker summary is End-of-Day (EOD).
-        # Data hanya tersedia setelah market close (~16:00 WIB).
-        # Kita HARUS selalu gunakan tanggal trading terakhir yang EOD-nya sudah final.
-        tz_jakarta = pytz.timezone('Asia/Jakarta')
-        now_jakarta = datetime.now(tz_jakarta)
-        today = now_jakarta.date()
-        
-        query_date = target_date
-        
-        # RULE 1: Jika query_date >= hari ini, shift ke kemarin karena
-        # EOD hari ini belum tersedia (market belum tutup atau baru tutup).
-        # Bahkan jika sudah lewat jam 16:00, GoAPI kadang delay 1-2 jam.
-        if query_date >= today:
-            query_date = today - timedelta(days=1)
-        
-        # RULE 2: Selalu skip weekend (Sabtu/Minggu → mundur ke Jumat)
-        while query_date.weekday() >= 5:
-            query_date = query_date - timedelta(days=1)
-        
-        logger.info(f"[DataProvider] Broker summary {ticker}: target_date={target_date} → query_date={query_date}")
-
-        # ------------------------------------------------------------------ #
-        #  Cache check: Look backwards up to 10 hari untuk menemukan data cache
-        # ------------------------------------------------------------------ #
-        temp_date = query_date
-        for attempt in range(10):
-            cached_df = self._get_cached_broker_summary(ticker, temp_date)
-            if cached_df is not None:
-                logger.info(f"[DataProvider] Cache HIT: broker summary {ticker} on {temp_date} (attempt {attempt+1})")
-                return cached_df
-            
-            # Go back one day
-            temp_date = temp_date - timedelta(days=1)
-            while temp_date.weekday() >= 5:
-                temp_date = temp_date - timedelta(days=1)
-
-        url = f"https://api.goapi.io/stock/idx/{ticker}/broker_summary"
-        results = []
-        
-        # Loop backwards up to 5 days to handle holidays
-        for attempt in range(5):
-            params = {
-                "date": str(query_date)
-            }
-            try:
-                data = self._make_goapi_request(url, params)
-                results = data.get("data", {}).get("results", [])
-                if results:
-                    logger.info(f"Found GoAPI broker summary for {ticker} on date {query_date}")
-                    break
-            except Exception as e:
-                logger.warning(f"Failed to fetch GoAPI broker summary for {query_date}: {e}")
-                if "All configured GoAPI keys failed" in str(e):
-                    raise e
-                
-            # Go back one day
-            query_date = query_date - timedelta(days=1)
-            # Skip weekends
-            while query_date.weekday() >= 5:
-                query_date = query_date - timedelta(days=1)
-        
-        foreign_brokers = {"AK", "BK", "KZ", "RX", "AG", "YU"}
-        
-        rows = []
-        for row in results:
-            # GoAPI fields: code (broker code), side (BUY/SELL), lot (in lots), value (in IDR)
-            broker_code = row.get("code", "UNKNOWN")
-            side = row.get("side") or "BUY"
-            lot = abs(int(row.get("lot") or 0))
-            value = abs(float(row.get("value") or 0))
-            
-            # Map based on BUY or SELL side
-            if side == "BUY":
-                buy_lot = lot
-                sell_lot = 0
-                net_lot = lot
-                buy_value = value
-                sell_value = 0.0
-            else:
-                buy_lot = 0
-                sell_lot = lot
-                net_lot = -lot
-                buy_value = 0.0
-                sell_value = value
-            
-            # Broker categories:
-            # SM: CC, BK, KZ, AK, AG, RX
-            # FG: AK, BK, KZ, RX, AG, YU
-            # DI: NI, ZP, LG, MG, OD, SQ, DX, GR, CP, TP, EP, IF, BB
-            # RT: XL, PD, YP, XC, KK
-            if broker_code in {"CC", "BK", "KZ", "AK", "AG", "RX"}:
-                broker_cat = "SM"
-            elif broker_code in {"AK", "BK", "KZ", "RX", "AG", "YU"}:
-                broker_cat = "FG"
-            elif broker_code in {"NI", "ZP", "LG", "MG", "OD", "SQ", "DX", "GR", "CP", "TP", "EP", "IF", "BB"}:
-                broker_cat = "DI"
-            elif broker_code in {"XL", "PD", "YP", "XC", "KK"}:
-                broker_cat = "RT"
-            else:
-                broker_cat = "RT"
-            
-            rows.append({
-                "date": query_date,
-                "broker_code": broker_code,
-                "buy_lot": buy_lot,
-                "sell_lot": sell_lot,
-                "net_lot": net_lot,
-                "buy_value": buy_value,
-                "sell_value": sell_value,
-                "investor_type": "foreign" if broker_code in foreign_brokers else "domestic",
-                "broker_category": broker_cat,
-            })
-            
-        df = pd.DataFrame(rows)
-        logger.info(f"Fetched {len(df)} broker rows for {ticker} from GoAPI")
-        
-        # Save EOD broker summary to SQLite DB cache
-        if not df.empty:
-            self._save_broker_summary_cache(ticker, query_date, df)
-            
-        return df
 
     # ------------------------------------------------------------------ #
     #  Foreign Flow Cache (SQLite)
@@ -747,7 +559,7 @@ class DataProviderService:
     ) -> pd.DataFrame:
         """Generate mock broker summary data."""
         import zlib
-        seed = zlib.adler32((ticker + "broker").encode('utf-8'))
+        seed = zlib.adler32(f"{ticker}_{target_date}_broker".encode('utf-8'))
         np.random.seed(seed)
 
         broker_codes = ["YP", "CC", "DX", "AK", "KS", "MS", "RX", "GR", "PD", "BK",
@@ -786,145 +598,85 @@ class DataProviderService:
     # ------------------------------------------------------------------ #
 
     def get_foreign_flow(
-        self, ticker: str, target_date: Optional[date] = None, days: int = 30
+        self,
+        ticker: str,
+        target_date: Optional[date] = None,
+        days: int = 30,
+        broker_df: Optional[pd.DataFrame] = None,
     ) -> pd.DataFrame:
         """
-        Returns foreign flow DataFrame — prioritas: real data (cache + GoAPI).
-        Hanya fallback ke mock jika tidak ada GoAPI key dan provider bukan yfinance.
-        
-        Logika baru:
-        1. Kumpulkan data real dari SQLite cache untuk setiap trading day
-        2. Untuk hari yang cache miss, coba GoAPI (max 5 API calls)
-        3. Sisanya fill dari broker_summary cache (fallback)
-        4. Jika total data real < 5 hari, fallback ke mock penuh
+        Returns foreign flow DataFrame derived directly from Foreign Brokers (FG: AK, BK, KZ, RX, AG, YU).
+        Calculated from Supabase broker summary data.
         """
-        from datetime import datetime
-        import pytz
-
         if target_date is None:
             target_date = date.today()
 
-        # Pastikan target_date tidak di masa depan dan skip weekend
-        tz_jakarta = pytz.timezone('Asia/Jakarta')
-        now_jakarta = datetime.now(tz_jakarta)
-        today = now_jakarta.date()
+        # 1. Use provided broker_df or fetch from Supabase
+        if broker_df is None or broker_df.empty:
+            broker_df = self.get_broker_summary(ticker, target_date=target_date, days=days)
 
-        if target_date >= today:
-            target_date = today - timedelta(days=1)
-        while target_date.weekday() >= 5:
-            target_date = target_date - timedelta(days=1)
+        if broker_df is not None and not broker_df.empty:
+            derived_ff = self._derive_foreign_flow_from_broker_df(ticker, broker_df)
+            if not derived_ff.empty:
+                return derived_ff
 
-        # Jika tidak punya Supabase key maupun GoAPI keys, langsung mock
-        if not self.supabase_key and not self.goapi_keys:
-            if self.provider in ("yfinance", "api"):
-                logger.warning("Foreign flow not available via yfinance and Supabase/GOAPI_KEY not set — using mock")
-            return self._generate_mock_foreign_flow(ticker, target_date, days)
+        # 2. SQLite cache check
+        cached_ff = self._get_cached_foreign_flow(ticker, target_date)
+        if cached_ff is not None and not cached_ff.empty:
+            return cached_ff
 
-        # --- Kumpulkan data real dari cache + GoAPI ---
-        real_rows = []
-        goapi_calls = 0
-        max_goapi_calls = 5  # Limit API calls per ticker
+        # 3. Fallback to mock if no broker data available
+        logger.warning(f"Foreign flow not available via Supabase for {ticker} — using mock fallback")
+        return self._generate_mock_foreign_flow(ticker, target_date, days)
 
-        # Generate list of business days to check
-        check_date = target_date
-        dates_to_check = []
-        for _ in range(days):
-            dates_to_check.append(check_date)
-            check_date = check_date - timedelta(days=1)
-            while check_date.weekday() >= 5:
-                check_date = check_date - timedelta(days=1)
+    def _derive_foreign_flow_from_broker_df(self, ticker: str, broker_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Derives daily foreign flow DataFrame from broker summary data using Foreign Brokers (FG: AK, BK, KZ, RX, AG, YU).
+        """
+        if broker_df.empty or "broker_code" not in broker_df.columns:
+            return pd.DataFrame()
 
-        foreign_brokers = {"AK", "BK", "KZ", "RX", "AG", "YU"}
+        foreign_brokers = self.FOREIGN_BROKERS
+        daily_rows = []
 
-        for q_date in dates_to_check:
-            # 1. Cek SQLite foreign_flow_cache
-            cached_ff = self._get_cached_foreign_flow(ticker, q_date)
-            if cached_ff is not None and not cached_ff.empty:
-                row = cached_ff.iloc[0]
-                real_rows.append({
-                    "date": q_date,
-                    "foreign_buy_lot": int(row["foreign_buy_lot"]),
-                    "foreign_sell_lot": int(row["foreign_sell_lot"]),
-                    "foreign_net_lot": int(row["foreign_net_lot"]),
-                    "foreign_buy_value": float(row["foreign_buy_value"]),
-                    "foreign_sell_value": float(row["foreign_sell_value"]),
-                    "foreign_net_value": float(row["foreign_net_value"]),
-                    "foreign_participation_percent": float(row.get("foreign_participation_percent", 0)),
-                })
-                continue
+        for d, group in broker_df.groupby("date"):
+            fg_group = group[group["broker_code"].isin(foreign_brokers)]
+            fb_lot = int(fg_group["buy_lot"].sum()) if not fg_group.empty else 0
+            fs_lot = int(fg_group["sell_lot"].sum()) if not fg_group.empty else 0
+            fb_val = float(fg_group["buy_value"].sum()) if not fg_group.empty else 0.0
+            fs_val = float(fg_group["sell_value"].sum()) if not fg_group.empty else 0.0
 
-            # 2. Cek broker_summary cache (derive FF dari sana)
-            cached_broker = self._get_cached_broker_summary(ticker, q_date)
-            if cached_broker is not None and not cached_broker.empty:
-                foreign_rows = cached_broker[cached_broker["broker_code"].isin(foreign_brokers)]
-                buy_lot = int(foreign_rows["buy_lot"].sum())
-                sell_lot = int(foreign_rows["sell_lot"].sum())
-                buy_val = float(foreign_rows["buy_value"].sum())
-                sell_val = float(foreign_rows["sell_value"].sum())
-                real_rows.append({
-                    "date": q_date,
-                    "foreign_buy_lot": buy_lot,
-                    "foreign_sell_lot": sell_lot,
-                    "foreign_net_lot": buy_lot - sell_lot,
-                    "foreign_buy_value": buy_val,
-                    "foreign_sell_value": sell_val,
-                    "foreign_net_value": buy_val - sell_val,
-                    "foreign_participation_percent": 0,
-                })
-                continue
+            total_val = float(group["buy_value"].sum() + group["sell_value"].sum())
+            fg_val = fb_val + fs_val
+            part_pct = round((fg_val / total_val) * 100, 2) if total_val > 0 else 0.0
 
-            # 3. Live GoAPI call (hanya jika ada goapi_keys dan limit belum habis)
-            if not self.goapi_keys or goapi_calls >= max_goapi_calls:
-                continue
+            row_date = pd.to_datetime(d).date() if not isinstance(d, date) else d
 
-            url = f"https://api.goapi.io/stock/idx/{ticker}/broker_summary"
-            try:
-                data = self._make_goapi_request(url, {"date": str(q_date)})
-                results = data.get("data", {}).get("results", [])
-                if results:
-                    buy_lot = sum(abs(int(r.get("lot") or 0)) for r in results if r.get("side") == "BUY" and r.get("code", "") in foreign_brokers)
-                    sell_lot = sum(abs(int(r.get("lot") or 0)) for r in results if r.get("side") == "SELL" and r.get("code", "") in foreign_brokers)
-                    buy_val = sum(abs(float(r.get("value") or 0)) for r in results if r.get("side") == "BUY" and r.get("code", "") in foreign_brokers)
-                    sell_val = sum(abs(float(r.get("value") or 0)) for r in results if r.get("side") == "SELL" and r.get("code", "") in foreign_brokers)
-                    real_rows.append({
-                        "date": q_date,
-                        "foreign_buy_lot": buy_lot,
-                        "foreign_sell_lot": sell_lot,
-                        "foreign_net_lot": buy_lot - sell_lot,
-                        "foreign_buy_value": buy_val,
-                        "foreign_sell_value": sell_val,
-                        "foreign_net_value": buy_val - sell_val,
-                        "foreign_participation_percent": 0,
-                    })
-                    goapi_calls += 1
-            except Exception as e:
-                logger.warning(f"GoAPI foreign flow fetch failed for {ticker} on {q_date}: {e}")
-                if "All configured GoAPI keys failed" in str(e):
-                    break
-                goapi_calls += 1  # Count failed attempts too
+            daily_rows.append({
+                "date": row_date,
+                "foreign_buy_lot": fb_lot,
+                "foreign_sell_lot": fs_lot,
+                "foreign_net_lot": fb_lot - fs_lot,
+                "foreign_buy_value": fb_val,
+                "foreign_sell_value": fs_val,
+                "foreign_net_value": fb_val - fs_val,
+                "foreign_participation_percent": part_pct,
+            })
 
-        # --- Build DataFrame ---
-        if len(real_rows) >= 5:
-            # Simpan data baru ke cache
-            new_rows = [r for r in real_rows if self._get_cached_foreign_flow(ticker, r["date"]) is None]
-            if new_rows:
-                self._save_foreign_flow_cache(ticker, new_rows)
+        if not daily_rows:
+            return pd.DataFrame()
 
-            df = pd.DataFrame(real_rows)
-            df = df.sort_values("date").reset_index(drop=True)
-            logger.info(f"[DataProvider] Foreign flow {ticker}: {len(df)} real data rows collected")
-            return df
-        else:
-            # Tidak cukup data real, fallback ke mock
-            logger.warning(f"[DataProvider] Foreign flow {ticker}: only {len(real_rows)} real rows, falling back to mock")
-            return self._generate_mock_foreign_flow(ticker, target_date, days)
+        df = pd.DataFrame(daily_rows).sort_values("date").reset_index(drop=True)
+        self._save_foreign_flow_cache(ticker, daily_rows)
+        logger.info(f"[DataProvider] Derived foreign flow for {ticker}: {len(df)} days from Supabase broker summary")
+        return df
 
     def _generate_mock_foreign_flow(
         self, ticker: str, target_date: date, days: int
     ) -> pd.DataFrame:
-        """Generate mock foreign flow data."""
+        """Generate mock foreign flow data with date-based seed."""
         import zlib
-        seed = zlib.adler32((ticker + "ff").encode('utf-8'))
+        seed = zlib.adler32(f"{ticker}_{target_date}_ff".encode('utf-8'))
         np.random.seed(seed)
 
         dates = pd.bdate_range(end=target_date, periods=days)

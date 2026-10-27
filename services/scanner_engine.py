@@ -83,7 +83,7 @@ class ScannerEngine:
         self.news_engine = NewsEngine()
         self.llm_engine = LLMEngine()
         self.regime_engine = RegimeEngine(self.data_provider)
-        self._executor = ThreadPoolExecutor(max_workers=5)  # Reduced from 20 to avoid GoAPI rate limits
+        self._executor = ThreadPoolExecutor(max_workers=10)
 
     # ------------------------------------------------------------------ #
     #  Multi-Timeframe: Fetch daily trend for cross-check
@@ -182,7 +182,7 @@ class ScannerEngine:
                     ff_data = pd.DataFrame(columns=["date", "foreign_buy_lot", "foreign_sell_lot", "foreign_net_lot", "foreign_buy_value", "foreign_sell_value", "foreign_net_value", "foreign_participation_percent"])
                 else:
                     broker_data = self.data_provider.get_broker_summary(ticker, target_date=last_trading_day, days=20)
-                    ff_data = self.data_provider.get_foreign_flow(ticker, target_date=last_trading_day, days=30)
+                    ff_data = self.data_provider.get_foreign_flow(ticker, target_date=last_trading_day, days=30, broker_df=broker_data)
 
             result = {
                 "ticker": ticker,
@@ -202,12 +202,10 @@ class ScannerEngine:
     async def _fetch_all_data_parallel(self, tickers: List[str], interval: str, period_days: int, pure_technical: bool = False) -> List[Dict]:
         """Fetch data for all tickers in parallel using ThreadPoolExecutor."""
         loop = asyncio.get_event_loop()
-        sem = asyncio.Semaphore(10 if pure_technical else 5)  # Lebih cepat di pure technical karena tanpa GoAPI rate limit
+        sem = asyncio.Semaphore(10)
 
         async def fetch_bounded(t):
             async with sem:
-                if not pure_technical:
-                    await asyncio.sleep(0.2)  # Stagger requests to avoid GoAPI 429 bursts
                 return await loop.run_in_executor(self._executor, self._fetch_stock_data, t, interval, period_days, pure_technical)
 
         tasks = [fetch_bounded(t) for t in tickers]
@@ -278,7 +276,7 @@ class ScannerEngine:
                         ff_data = pd.DataFrame(columns=["date", "foreign_buy_lot", "foreign_sell_lot", "foreign_net_lot", "foreign_buy_value", "foreign_sell_value", "foreign_net_value", "foreign_participation_percent"])
                     else:
                         broker_data = self.data_provider.get_broker_summary(ticker, target_date=last_trading_day, days=20)
-                        ff_data = self.data_provider.get_foreign_flow(ticker, target_date=last_trading_day, days=30)
+                        ff_data = self.data_provider.get_foreign_flow(ticker, target_date=last_trading_day, days=30, broker_df=broker_data)
 
                 # Multi-TF for intraday
                 daily_trend = {}
@@ -615,13 +613,16 @@ class ScannerEngine:
 
         # ========== PHASE 3: LLM analysis (parallel with semaphore) ==========
         sem = asyncio.Semaphore(2)  # Max 2 concurrent LLM requests to respect Gemini 15 RPM limit
+        prefetched_map = {d["ticker"]: d for d in all_data if isinstance(d, dict) and "ticker" in d}
 
         async def process_cand(cand):
             async with sem:
                 try:
+                    pref = prefetched_map.get(cand.ticker)
                     final_sig = await self.scan_single(
                         cand.ticker,
                         run_llm=True,
+                        prefetched_data=pref,
                         override_interval=override_interval,
                         pure_technical=pure_technical,
                     )
