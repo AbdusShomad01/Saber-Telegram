@@ -26,6 +26,17 @@ Setiap saham yang berhasil lolos pemindaian akan dikategorikan ke dalam salah sa
     *   🔴 **BEARISH**: Pasar IHSG sedang tren turun. Saham dengan setup teknikal & akumulasi bandar yang bagus tetap dapat memicu sinyal BUY tanpa dipotong skornya oleh IHSG.
 *   **📊 Daily Trend**: Menampilkan tren harian saham. Sangat penting saat membaca sinyal **intraday** (misal chart 60 menit) untuk memastikan Anda tidak membeli saham yang tren besarnya (harian) masih bearish kuat (*trend crosscheck*).
 
+### 2.1 Filter Eliminasi Otomatis (Hard Filters)
+Sebelum saham dinilai (*scoring*), sistem menerapkan filter awal untuk membuang saham berisiko:
+1.  **Harga Saham Minimal (> Rp 10)**: Saham dengan harga penutupan terakhir **> Rp 10 tetap dimasukkan** ke dalam radar pemindaian. Filter restriksi FCA (*Full Call Auction*) telah ditiadakan sehingga seluruh saham aktif di atas Rp 10 tetap diproses. Hanya saham tidur/berisiko ekstrem dengan harga $\le$ Rp 10 yang dikeluarkan.
+2.  **Saham Naik > 15% Kemarin**: Saham yang sudah melonjak > 15% pada hari perdagangan sebelumnya langsung dikeluarkan dari kandidat (mencegah risiko membeli di pucuk *climax run*, aksi *profit taking* tajam, atau risiko suspensi bursa).
+3.  **Threshold Likuiditas**:
+    *   **Daily (1d)**: Rata-rata volume 20 hari minimal **5.000 lot** (500.000 lembar) dan nilai transaksi rata-rata minimal **Rp 2 Miliar/hari** (dilonggarkan dari sebelumnya 10.000 lot & Rp 5 Miliar agar lebih banyak saham second-liner potensial tersaring).
+    *   **Intraday (60m)**: Minimal 1.000 lot dan nilai transaksi Rp 1 Miliar.
+4.  **Filter Tren & Volatilitas**:
+    *   **ADX < 15**: Saham tanpa arah tren yang jelas dieleminasi.
+    *   **ATR > 7%**: Saham dengan volatilitas harian ekstrem dieliminasi demi keamanan manajemen risiko modal.
+
 ---
 
 ## 3. Skor Penilaian & Keyakinan
@@ -72,14 +83,20 @@ Untuk saham dengan status **WATCHLIST**, bot menggunakan analisis Fibonacci retr
 ---
 
 ## 6. Rincian Poin Analisis (Score Breakdown)
-Setiap indikator berkontribusi terhadap total skor dengan bobot sebagai berikut:
-1.  **Trend & Momentum (Maks 25 poin)**: Mengukur arah tren menggunakan moving averages (EMA20, EMA50) dan indikator momentum (RSI, MACD, ADX).
-2.  **Volume & Liquidity (Maks 15 poin)**: Menilai apakah saham memiliki volume transaksi yang cukup likuid untuk keluar-masuk dengan mudah.
-3.  **Pattern (Maks 15 poin)**: Skor tambahan jika terdeteksi pola grafik bullish (*Double Bottom, Cup & Handle, Bullish Flag*, dll.).
-4.  **Support/Resistance (Maks 10 poin)**: Menilai kedekatan harga dengan support kunci (semakin dekat support, semakin baik skor risikonya).
-5.  **Bandarmology (Maks 15 poin)**: Menilai akumulasi/distribusi dari top broker lokal.
-6.  **Foreign Flow (Maks 10 poin)**: Menilai volume akumulasi bersih dari investor asing.
-7.  **Risk/Reward (Maks 10 poin)**: Menilai perbandingan potensi profit dibanding potensi rugi.
+Sistem penilaian (*scoring*) memiliki total **100 poin (100%)** yang terbagi dalam 3 pilar utama:
+- 📊 **Analisis Teknikal**: **75% (75 poin)**
+- 🏦 **Analisa Broker Summary (Bandarmology)**: **15% (15 poin)**
+- 🌐 **Analisa Foreign Flow**: **10% (10 poin)**
+
+### Distribusi Poin Analisis (8 Engines):
+1.  **Trend & Momentum (Maks 21 poin)**: Mengukur arah tren menggunakan moving averages (EMA10, EMA20, EMA50) dan indikator momentum (RSI, MACD, ADX, VWAP).
+2.  **Volume & Liquidity (Maks 20 poin)**: Menilai lonjakan volume breakout (≥2x Avg20), perbandingan volume 5H vs 20H, buying/selling pressure, serta likuiditas nilai transaksi harian.
+3.  **Pattern & Candle (Maks 10 poin)**: Skor konfirmasi pola chart bullish (*Double Bottom, Cup & Handle, Bullish Flag*, dll.) dan candlestick reversal.
+4.  **Gap Analysis (Maks 5 poin)**: Mendeteksi gap up terkonfirmasi volume atau gap down berisiko.
+5.  **Sector Correlation (Maks 4 poin)**: Mengukur relative strength pergerakan saham dibandingkan indeks IHSG (outperform/underperform).
+6.  **Support/Resistance & Risk-Reward (Maks 15 poin)**: Menilai kedekatan harga dengan support kunci (Bollinger Band, Stochastic oversold) serta optimalitas rasio Risk/Reward (ATR, OBV).
+7.  **Broker Summary / Bandarmology (Maks 15 poin)**: Menilai akumulasi/distribusi smart money, profil broker pembeli elite (AK, RX, DP, dll.), dominasi broker asing, dan winning broker combo.
+8.  **Foreign Flow (Maks 10 poin)**: Menilai volume akumulasi/distribusi bersih dari investor asing (*net foreign buy/sell*).
 
 ---
 

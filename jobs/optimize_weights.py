@@ -17,24 +17,26 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("WeightOptimizer")
 
 DEFAULT_WEIGHTS: Dict[str, float] = {
-    "trend_momentum": 25.0,
-    "volume_liquidity": 15.0,
-    "pattern": 15.0,
-    "support_resistance": 10.0,
+    "trend_momentum": 21.0,
+    "volume_liquidity": 20.0,
+    "pattern": 10.0,
+    "gap_analysis": 5.0,
+    "sector_correlation": 4.0,
+    "support_resistance": 15.0,
     "bandarmology": 15.0,
     "foreign_flow": 10.0,
-    "risk_reward": 10.0,
 }
 
 # Bounds for each category to ensure no category is completely zeroed out
 CATEGORY_BOUNDS = {
-    "trend_momentum": (10, 40),
-    "volume_liquidity": (5, 30),
-    "pattern": (5, 30),
+    "trend_momentum": (10, 35),
+    "volume_liquidity": (10, 30),
+    "pattern": (5, 20),
+    "gap_analysis": (2, 10),
+    "sector_correlation": (2, 10),
     "support_resistance": (5, 25),
-    "bandarmology": (5, 30),
-    "foreign_flow": (5, 25),
-    "risk_reward": (5, 25),
+    "bandarmology": (5, 25),
+    "foreign_flow": (5, 20),
 }
 
 def load_resolved_signals(db_path: str) -> List[Dict]:

@@ -60,24 +60,8 @@ def _invalidate_cache():
 #  Known FCA (Papan Pemantauan Khusus) tickers — fallback list
 #  Updated periodically; the service will try GoAPI first.
 # ------------------------------------------------------------------ #
-KNOWN_FCA_TICKERS: Set[str] = {
-    # Verified FCA (Papan Pemantauan Khusus) stocks per IDX announcements
-    # These are stocks under Full Call Auction mechanism — NOT regular continuous trading
-    # Source: IDX Papan Pemantauan Khusus announcements (updated periodically)
-    # 
-    # Key FCA criteria: price < Rp 51, consecutive losses, equity < minimum, etc.
-    # The bot will EXCLUDE these as they are unsuitable for intraday signal generation.
-    "BEKS", "MYRX", "PDES", "TKGA", "BIMA", "APEX",
-    "SAFE", "LCGP", "TRIO", "TELE", "MCAS",
-    "CNKO", "KOIN", "ATPK", "MAMI", "DNAR", "DIGI", "GLOB",
-    "SDRA", "POLU",
-    # Additional known FCA stocks from IDX PPK list (2024-2025)
-    "BPFI", "KBRI", "DEWA", "ENRG", "BIPI", "TFCO",
-    "SMCB", "BCIC", "BNLI", "BVIC", "YULE",
-    "MYRX", "TAXI", "KARW", "GEMA", "ARGO",
-    "LAPD", "POLY", "PSAB", "PTSN", "PRAY",
-    "BLTZ", "UNIT",
-}
+# Dinonaktifkan: Tidak ada lagi filter FCA, saham dengan harga > 10 tetap dimasukkan
+KNOWN_FCA_TICKERS: Set[str] = set()
 
 # ------------------------------------------------------------------ #
 #  Known Suspended (Suspen) tickers — fallback list
@@ -469,10 +453,10 @@ def _validate_ticker_is_active(ticker: str) -> bool:
 
 def get_full_idx_universe(
     goapi_keys: Optional[List[str]] = None,
-    exclude_fca: bool = True,
+    exclude_fca: bool = False,      # Dinonaktifkan: tidak ada lagi pembatasan FCA
     exclude_suspended: bool = True,
     validate_active: bool = False,  # Set True for extra validation (slower)
-    min_price: float = 0,           # Disabled: saham > 50 IDR bisa masuk jika memenuhi kriteria
+    min_price: float = 10,          # Saham > 10 IDR tetap dimasukkan
     board_filter: Optional[List[str]] = None,  # e.g. ["Utama", "Pengembangan"]
 ) -> List[Dict]:
     """

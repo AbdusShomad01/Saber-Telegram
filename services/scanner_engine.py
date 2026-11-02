@@ -538,7 +538,7 @@ class ScannerEngine:
             goapi_keys = [
                 k.strip() for k in (settings.GOAPI_KEY or "").split(",") if k.strip()
             ]
-            universe = get_full_idx_universe(goapi_keys=goapi_keys or None)
+            universe = get_full_idx_universe(goapi_keys=goapi_keys or None, exclude_fca=False, min_price=10)
             if not universe:
                 logger.warning("[scan_all] Full IDX universe is empty! Falling back to default universe.")
                 universe = get_stock_universe()

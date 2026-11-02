@@ -189,7 +189,14 @@ def test_weights_sum_free():
     categories = engine._get_categories("free")
     total = sum(categories.values())
     assert abs(total - 100) < 0.01, f"FREE mode weights sum = {total} (bukan 100!)"
-    print(f"  [OK] FREE mode weights sum = {total}")
+
+    # Validasi 75% Teknikal, 15% Broker Summary (Bandarmology), 10% Foreign Flow
+    technical_cats = ["trend_momentum", "volume_liquidity", "pattern", "gap_analysis", "sector_correlation", "support_resistance"]
+    technical_sum = sum(categories[cat] for cat in technical_cats)
+    assert abs(technical_sum - 75.0) < 0.01, f"Technical weight sum = {technical_sum} (harus 75%)"
+    assert abs(categories["bandarmology"] - 15.0) < 0.01, f"Bandarmology weight = {categories['bandarmology']} (harus 15%)"
+    assert abs(categories["foreign_flow"] - 10.0) < 0.01, f"Foreign Flow weight = {categories['foreign_flow']} (harus 10%)"
+    print(f"  [OK] FREE mode weights sum = {total} (Teknikal: {technical_sum}%, Broker: {categories['bandarmology']}%, Foreign: {categories['foreign_flow']}%)")
 
 
 def test_weights_sum_premium():
@@ -198,7 +205,13 @@ def test_weights_sum_premium():
     categories = engine._get_categories("premium")
     total = sum(categories.values())
     assert abs(total - 100) < 0.01, f"PREMIUM mode weights sum = {total} (bukan 100!)"
-    print(f"  [OK] PREMIUM mode weights sum = {total}")
+
+    technical_cats = ["trend_momentum", "volume_liquidity", "pattern", "gap_analysis", "sector_correlation", "support_resistance"]
+    technical_sum = sum(categories[cat] for cat in technical_cats)
+    assert abs(technical_sum - 75.0) < 0.01, f"Technical weight sum = {technical_sum} (harus 75%)"
+    assert abs(categories["bandarmology"] - 15.0) < 0.01, f"Bandarmology weight = {categories['bandarmology']} (harus 15%)"
+    assert abs(categories["foreign_flow"] - 10.0) < 0.01, f"Foreign Flow weight = {categories['foreign_flow']} (harus 10%)"
+    print(f"  [OK] PREMIUM mode weights sum = {total} (Teknikal: {technical_sum}%, Broker: {categories['bandarmology']}%, Foreign: {categories['foreign_flow']}%)")
 
 
 def test_gap_engine():

@@ -3,15 +3,16 @@ IDX AI Signal Bot - Scoring Engine (CORE)
 The deterministic decision maker. No LLM involvement.
 
 Aggregates scores from 8 engines:
-- Trend & Momentum       (25 pts free / 20 pts premium)
-- Volume & Liquidity     (28 pts free / 20 pts premium)
-- Pattern & Candle       (13 pts free / 10 pts premium)
-- Gap Analysis           (5 pts both)
-- Sector Correlation     (4 pts both)
-- Support & Resistance   (15 pts free / 6 pts premium)
-- Bandarmology           (5 pts free / 20 pts premium) — WR-based broker confidence
-- Foreign Flow           (5 pts free / 15 pts premium)
+- Trend & Momentum       (21 pts)
+- Volume & Liquidity     (20 pts)
+- Pattern & Candle       (10 pts)
+- Gap Analysis           (5 pts)
+- Sector Correlation     (4 pts)
+- Support & Resistance   (15 pts)
+- Bandarmology           (15 pts) — WR-based broker confidence (Broker Summary)
+- Foreign Flow           (10 pts)
 Total: 100 points
+(Analisis Teknikal: 75%, Broker Summary: 15%, Foreign Flow: 10%)
 
 Bandarmology WR-Based Scoring (dari dataset 458 resolved signals):
 - Elite buyers (AK/RX/DP/NI/YP) as #1 buyer → confidence +3 (WR 97-100%)
@@ -34,6 +35,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional
+import pandas as pd
 
 from app.config import get_settings
 from services.regime_engine import apply_ihsg_regime_adjustment
@@ -139,6 +141,8 @@ class FilterFunnelStats:
     failed_hard_filter: int = 0
     passed_to_signal: int = 0       # STRONG BUY + BUY + WATCHLIST
     # -- Breakdown Hard Filter --
+    gugur_min_price: int = 0        # Harga <= Rp 10
+    gugur_prev_day_surge: int = 0   # Naik > 15% di hari sebelumnya
     gugur_adx: int = 0              # ADX < 15
     gugur_atr: int = 0              # ATR > 7%
     gugur_volume: int = 0           # hanya gagal volume lot
@@ -162,10 +166,12 @@ class FilterFunnelStats:
             f"  Total saham diproses : {self.total_stocks}\n"
             f"  Lolos Hard Filter    : {self.passed_hard_filter} ({hf_pct:.1f}%)\n"
             f"  Gugur Hard Filter    : {self.failed_hard_filter}\n"
+            f"  ├─ Harga <= Rp 10    : {self.gugur_min_price}\n"
+            f"  ├─ Naik > 15% Kemarin: {self.gugur_prev_day_surge}\n"
             f"  ├─ ADX < 15          : {self.gugur_adx}\n"
             f"  ├─ ATR > 7%          : {self.gugur_atr}\n"
-            f"  ├─ Volume < 5Jt lot  : {self.gugur_volume}\n"
-            f"  ├─ Value < 20M IDR   : {self.gugur_value}\n"
+            f"  ├─ Volume < 5Rb lot  : {self.gugur_volume}\n"
+            f"  ├─ Value < 2M IDR    : {self.gugur_value}\n"
             f"  └─ Volume & Value    : {self.gugur_volume_dan_value}\n"
             f"  Lolos ke Sinyal      : {self.passed_to_signal} ({sig_pct:.1f}%)\n"
             f"  ├─ STRONG BUY : {self.strong_buy_count}\n"
@@ -198,14 +204,14 @@ class ScoringEngine:
     """
 
     CATEGORIES = {
-        "trend_momentum":    20,
+        "trend_momentum":    21,
         "volume_liquidity":  20,
         "pattern":           10,
-        "gap_analysis":       4,
+        "gap_analysis":       5,
         "sector_correlation": 4,
-        "support_resistance": 13,
-        "bandarmology":       17,
-        "foreign_flow":       12,
+        "support_resistance": 15,
+        "bandarmology":       15,
+        "foreign_flow":       10,
     }
 
     # Bobot khusus untuk Screener Siang (Noon Intraday) — PURE TEKNIKAL (Tanpa Bandarmologi & Foreign Flow)
@@ -302,7 +308,9 @@ class ScoringEngine:
             # Track breakdown kegagalan
             self._scan_stats.failed_hard_filter += 1
             cat = hf_result.category
-            if cat == "adx":              self._scan_stats.gugur_adx += 1
+            if cat == "min_price":          self._scan_stats.gugur_min_price += 1
+            elif cat == "prev_day_surge":   self._scan_stats.gugur_prev_day_surge += 1
+            elif cat == "adx":              self._scan_stats.gugur_adx += 1
             elif cat == "atr":             self._scan_stats.gugur_atr += 1
             elif cat == "volume":          self._scan_stats.gugur_volume += 1
             elif cat == "value":           self._scan_stats.gugur_value += 1
@@ -482,11 +490,76 @@ class ScoringEngine:
 
     ADX_HARD_FILTER_THRESHOLD = 15   # turun dari 20; zona 15-20 dinilai oleh scoring engine
     ADX_WARMUP_DAYS           = 28   # Wilder's smoothing butuh ~28 bar untuk stabil
-    MIN_AVG_VOLUME_LOT        = 1_000_000       # 1 juta lembar (~10.000 lot) untuk daily
-    MIN_AVG_VALUE_IDR         = 5_000_000_000   # Rp 5 miliar untuk daily
+    MIN_AVG_VOLUME_LOT        = 500_000         # 500 ribu lembar (~5.000 lot) untuk daily
+    MIN_AVG_VALUE_IDR         = 2_000_000_000   # Rp 2 miliar untuk daily
     MIN_AVG_VOLUME_LOT_INTRADAY = 100_000       # 100 ribu lembar (~1.000 lot) untuk intraday
     MIN_AVG_VALUE_IDR_INTRADAY  = 1_000_000_000 # Rp 1 miliar untuk intraday
     MAX_ATR_PCT               = 7.0  # %
+    MAX_PREV_DAY_GAIN_PCT     = 15.0 # % (saham naik > 15% di hari sebelumnya dikeluarkan)
+    MIN_PRICE                 = 10.0 # Rp (saham > 10 tetap dimasukkan, <= 10 dikeluarkan)
+
+    def _check_min_price_filter(self, ohlcv_df) -> HardFilterResult:
+        """
+        Filter harga minimal: saham dengan harga > 10 tetap dimasukkan.
+        Saham <= 10 dikeluarkan karena risiko likuiditas macet / delisting ekstrim.
+        """
+        if settings.DATA_PROVIDER == "mock" or ohlcv_df is None or len(ohlcv_df) == 0:
+            return HardFilterResult(passed=True)
+
+        try:
+            last_price = ohlcv_df["close"].iloc[-1]
+            if last_price <= self.MIN_PRICE:
+                return HardFilterResult(
+                    passed=False,
+                    category="min_price",
+                    reason=f"Harga saham Rp{last_price:.0f} <= Rp{self.MIN_PRICE:.0f} (terlalu rendah)"
+                )
+        except Exception as e:
+            logger.warning(f"[HardFilter] Gagal mengecek min_price: {e}")
+
+        return HardFilterResult(passed=True)
+
+    def _check_prev_day_gain_filter(self, ohlcv_df, timeframe: str = "1d") -> HardFilterResult:
+        """
+        Filter tolak saham yang sudah naik > 15% pada hari perdagangan sebelumnya.
+        Saham yang sudah melonjak terlalu tinggi (>15%) kemarin rawan aksi profit taking,
+        climax run, atau suspensi bursa.
+        """
+        if settings.DATA_PROVIDER == "mock" or ohlcv_df is None or len(ohlcv_df) < 2:
+            return HardFilterResult(passed=True)
+
+        try:
+            prev_gain = 0.0
+            if timeframe == "1d" or "date" not in ohlcv_df.columns:
+                c_last = ohlcv_df["close"].iloc[-1]
+                c_prev = ohlcv_df["close"].iloc[-2]
+                if c_prev > 0:
+                    prev_gain = ((c_last - c_prev) / c_prev) * 100.0
+            else:
+                # Intraday: kelompokkan per tanggal untuk melihat return hari kemarin
+                dates = pd.to_datetime(ohlcv_df["date"]).dt.date
+                daily_closes = ohlcv_df.groupby(dates)["close"].last()
+                if len(daily_closes) >= 3:
+                    c_kemarin = daily_closes.iloc[-2]
+                    c_lusa = daily_closes.iloc[-3]
+                    if c_lusa > 0:
+                        prev_gain = ((c_kemarin - c_lusa) / c_lusa) * 100.0
+                elif len(daily_closes) >= 2:
+                    c_last = daily_closes.iloc[-1]
+                    c_prev = daily_closes.iloc[-2]
+                    if c_prev > 0:
+                        prev_gain = ((c_last - c_prev) / c_prev) * 100.0
+
+            if prev_gain > self.MAX_PREV_DAY_GAIN_PCT:
+                return HardFilterResult(
+                    passed=False,
+                    category="prev_day_surge",
+                    reason=f"Saham naik > 15% di hari sebelumnya (+{prev_gain:.1f}%) — risiko profit taking / climax"
+                )
+        except Exception as e:
+            logger.warning(f"[HardFilter] Gagal mengecek prev_day_gain: {e}")
+
+        return HardFilterResult(passed=True)
 
     def _check_adx_filter(self, technical: Dict, data_len: int) -> HardFilterResult:
         """
@@ -514,7 +587,7 @@ class ScoringEngine:
         """
         Volume DAN Value check dengan threshold adaptif:
         - Intraday / Pure Technical (60m): volume min 100.000 lembar, value min Rp 1 Miliar
-        - Daily (1d): volume min 1.000.000 lembar, value min Rp 5 Miliar (realistis untuk bursa IDX)
+        - Daily (1d): volume min 500.000 lembar (~5.000 lot), value min Rp 2 Miliar
         """
         if settings.DATA_PROVIDER == "mock":
             return HardFilterResult(passed=True)
@@ -572,6 +645,8 @@ class ScoringEngine:
         Urutan: ADX → Liquidity (Volume+Value) → ATR
         """
         for check_fn in [
+            lambda: self._check_min_price_filter(ohlcv_df),
+            lambda: self._check_prev_day_gain_filter(ohlcv_df, timeframe=timeframe),
             lambda: self._check_adx_filter(technical, data_len),
             lambda: self._check_liquidity_filter(technical, ohlcv_df, timeframe=timeframe, pure_technical=pure_technical),
             lambda: self._check_atr_filter(technical),
@@ -963,7 +1038,7 @@ class ScoringEngine:
         return rules
 
     def _score_bandarmology(self, b: Dict) -> List[RuleResult]:
-        """Bandarmology — Max 20 poin.
+        """Bandarmology (Broker Summary) — Max 15 poin (15%).
         
         Scoring berdasarkan data performance nyata (Bandarmology Winning Combos dataset):
         
@@ -986,16 +1061,16 @@ class ScoringEngine:
 
         # ── 1. Base Accumulation/Distribution Signal ──
         if signal == "strong_accumulation":
-            rules.append(RuleResult("Strong Accumulation", 20, 20, cat,
+            rules.append(RuleResult("Strong Accumulation", 15, 15, cat,
                                     "Smart money akumulasi kuat"))
         elif signal == "accumulation":
-            rules.append(RuleResult("Accumulation", 13, 20, cat,
+            rules.append(RuleResult("Accumulation", 10, 15, cat,
                                     "Deteksi akumulasi"))
         elif signal == "distribution":
-            rules.append(RuleResult("Distribution", -10, 20, cat,
+            rules.append(RuleResult("Distribution", -8, 15, cat,
                                     "Deteksi distribusi"))
         elif signal == "strong_distribution":
-            rules.append(RuleResult("Strong Distribution", -20, 20, cat,
+            rules.append(RuleResult("Strong Distribution", -15, 15, cat,
                                     "Distribusi kuat terdeteksi"))
 
         # Smart vs retail divergence bonus (+4)
@@ -1070,23 +1145,23 @@ class ScoringEngine:
         return rules
 
     def _score_foreign_flow(self, ff: Dict) -> List[RuleResult]:
-        """Foreign Flow — Max 15 poin (dinaikkan dari 10)."""
+        """Foreign Flow — Max 10 poin (10%)."""
         rules = []
         cat = "foreign_flow"
 
         signal = ff.get("ff_signal", "neutral")
 
         if signal == "strong_foreign_buy":
-            rules.append(RuleResult("Strong Foreign Buy", 15, 15, cat,
+            rules.append(RuleResult("Strong Foreign Buy", 10, 10, cat,
                                     "Net foreign buy kuat — asing borong agresif"))
         elif signal == "foreign_buy":
-            rules.append(RuleResult("Foreign Buy", 9, 15, cat,
+            rules.append(RuleResult("Foreign Buy", 6, 10, cat,
                                     "Net foreign buy 5H positif"))
         elif signal == "foreign_sell":
-            rules.append(RuleResult("Foreign Sell", -8, 15, cat,
+            rules.append(RuleResult("Foreign Sell", -5, 10, cat,
                                     "Net foreign sell — asing dominan jual"))
         elif signal == "strong_foreign_sell":
-            rules.append(RuleResult("Strong Foreign Sell", -15, 15, cat,
+            rules.append(RuleResult("Strong Foreign Sell", -10, 10, cat,
                                     "Net foreign sell kuat — asing buang agresif"))
 
         return rules

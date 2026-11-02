@@ -175,25 +175,25 @@ class TestLiquidityFilter:
         assert result.passed is True
 
     def test_gugur_jika_volume_kurang(self, engine):
-        """Volume < 1 juta lembar → gugur dengan category 'volume'."""
-        tech = make_technical(volume_avg_20=500_000)  # < 1 juta
+        """Volume < 500 ribu lembar (5.000 lot) → gugur dengan category 'volume'."""
+        tech = make_technical(volume_avg_20=200_000)  # < 500 ribu
         ohlcv = make_ohlcv_df(avg_value=50_000_000_000)  # value OK
         result = engine._check_liquidity_filter(tech, ohlcv)
         assert result.passed is False
         assert result.category == "volume"
 
     def test_gugur_jika_value_kurang(self, engine):
-        """Value < Rp5 miliar → gugur dengan category 'value'."""
+        """Value < Rp2 miliar → gugur dengan category 'value'."""
         tech = make_technical(volume_avg_20=10_000_000)  # volume OK
-        ohlcv = make_ohlcv_df(avg_value=1_000_000_000)   # < 5 miliar
+        ohlcv = make_ohlcv_df(avg_value=1_000_000_000)   # < 2 miliar
         result = engine._check_liquidity_filter(tech, ohlcv)
         assert result.passed is False
         assert result.category == "value"
 
     def test_gugur_jika_keduanya_kurang(self, engine):
         """Keduanya gagal → category 'volume_and_value'."""
-        tech = make_technical(volume_avg_20=500_000)   # < 1 juta
-        ohlcv = make_ohlcv_df(avg_value=1_000_000_000)  # < 5 miliar
+        tech = make_technical(volume_avg_20=200_000)   # < 500 ribu
+        ohlcv = make_ohlcv_df(avg_value=1_000_000_000)  # < 2 miliar
         result = engine._check_liquidity_filter(tech, ohlcv)
         assert result.passed is False
         assert result.category == "volume_and_value"
@@ -213,11 +213,11 @@ class TestLiquidityFilter:
 
     def test_volume_threshold_constant(self, engine):
         """Pastikan threshold volume tidak berubah tanpa sengaja."""
-        assert engine.MIN_AVG_VOLUME_LOT == 1_000_000
+        assert engine.MIN_AVG_VOLUME_LOT == 500_000
 
     def test_value_threshold_constant(self, engine):
         """Pastikan threshold value tidak berubah tanpa sengaja."""
-        assert engine.MIN_AVG_VALUE_IDR == 5_000_000_000
+        assert engine.MIN_AVG_VALUE_IDR == 2_000_000_000
 
 
 # ─────────────────────────────────────────────
@@ -235,6 +235,87 @@ class TestATRFilter:
         r = engine._check_atr_filter(make_technical(atr_percent=7.1))
         assert r.passed is False
         assert r.category == "atr"
+
+
+# ─────────────────────────────────────────────
+#  MASALAH 5: Filter Harga Minimum (> 10 dimasukkan, <= 10 gugur)
+# ─────────────────────────────────────────────
+
+class TestMinPriceFilter:
+    """Saham yang harganya > 10 tetap dimasukkan, <= 10 dikeluarkan."""
+
+    def test_price_above_10_passes(self, engine):
+        """Harga Rp 15 (> 10) harus lolos."""
+        ohlcv = pd.DataFrame({"close": [14.0, 15.0]})
+        r = engine._check_min_price_filter(ohlcv)
+        assert r.passed is True
+
+    def test_price_50_passes(self, engine):
+        """Harga Rp 50 (saham gocap) harus lolos."""
+        ohlcv = pd.DataFrame({"close": [50.0, 50.0]})
+        r = engine._check_min_price_filter(ohlcv)
+        assert r.passed is True
+
+    def test_price_exactly_10_fails(self, engine):
+        """Harga tepat Rp 10 harus gugur (harus > 10)."""
+        ohlcv = pd.DataFrame({"close": [10.0, 10.0]})
+        r = engine._check_min_price_filter(ohlcv)
+        assert r.passed is False
+        assert r.category == "min_price"
+
+    def test_price_below_10_fails(self, engine):
+        """Harga Rp 5 (saham tidur/delisting) harus gugur."""
+        ohlcv = pd.DataFrame({"close": [6.0, 5.0]})
+        r = engine._check_min_price_filter(ohlcv)
+        assert r.passed is False
+        assert r.category == "min_price"
+
+
+# ─────────────────────────────────────────────
+#  MASALAH 6: Filter Saham Naik > 15% Kemarin
+# ─────────────────────────────────────────────
+
+class TestPrevDayGainFilter:
+    """Saham yang naik > 15% pada hari perdagangan sebelumnya harus digugurkan."""
+
+    def test_prev_gain_below_15_passes(self, engine):
+        """Kenaikan 10% kemarin harus lolos."""
+        ohlcv = pd.DataFrame({
+            "close": [1000.0, 1100.0],
+        })
+        r = engine._check_prev_day_gain_filter(ohlcv, timeframe="1d")
+        assert r.passed is True
+
+    def test_prev_gain_exactly_15_passes(self, engine):
+        """Kenaikan tepat 15% kemarin harus lolos (batas atas)."""
+        ohlcv = pd.DataFrame({
+            "close": [1000.0, 1150.0],
+        })
+        r = engine._check_prev_day_gain_filter(ohlcv, timeframe="1d")
+        assert r.passed is True
+
+    def test_prev_gain_above_15_fails(self, engine):
+        """Kenaikan 16% (ARA/climax) kemarin harus gugur."""
+        ohlcv = pd.DataFrame({
+            "close": [1000.0, 1160.0],
+        })
+        r = engine._check_prev_day_gain_filter(ohlcv, timeframe="1d")
+        assert r.passed is False
+        assert r.category == "prev_day_surge"
+        assert "15%" in r.reason
+
+    def test_prev_gain_intraday_grouped_by_date(self, engine):
+        """Intraday 60m: harus mengecek return hari kemarin vs lusa kemarin."""
+        dates = (
+            [pd.Timestamp("2026-10-20 10:00:00")] * 4 +
+            [pd.Timestamp("2026-10-21 10:00:00")] * 4 +
+            [pd.Timestamp("2026-10-22 10:00:00")] * 2
+        )
+        closes = [1000.0]*4 + [1200.0]*4 + [1210.0]*2
+        ohlcv = pd.DataFrame({"date": dates, "close": closes})
+        r = engine._check_prev_day_gain_filter(ohlcv, timeframe="60m")
+        assert r.passed is False
+        assert r.category == "prev_day_surge"
 
 
 # ─────────────────────────────────────────────
