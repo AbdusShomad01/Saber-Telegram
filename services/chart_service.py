@@ -4,6 +4,9 @@ Generates beautiful TradingView-style dark-mode stock charts using matplotlib.
 """
 
 import os
+import tempfile
+if 'MPLCONFIGDIR' not in os.environ:
+    os.environ['MPLCONFIGDIR'] = tempfile.gettempdir()
 import logging
 import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend

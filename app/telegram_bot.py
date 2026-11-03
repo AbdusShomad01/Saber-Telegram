@@ -134,7 +134,7 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Memulai scan seluruh saham IDX... (ini bisa memakan waktu)")
 
     try:
-        signals = await scanner.scan_all(top_n=10)
+        signals = await scanner.scan_all()
         if signals:
             summary_data = [scanner.signal_to_dict(s) for s in signals]
             msg = format_scan_summary(summary_data)
@@ -151,7 +151,7 @@ async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Mencari top signals...")
 
     try:
-        signals = await scanner.scan_all(top_n=10)
+        signals = await scanner.scan_all()
         buy_signals = [s for s in signals if s.signal in ("BUY", "STRONG BUY")]
         if buy_signals:
             summary_data = [scanner.signal_to_dict(s) for s in buy_signals[:10]]
@@ -230,7 +230,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "btn_scan":
         await message.reply_text("⏳ Memulai scan seluruh saham IDX... (ini bisa memakan waktu)")
         try:
-            signals = await scanner.scan_all(top_n=10)
+            signals = await scanner.scan_all()
             if signals:
                 summary_data = [scanner.signal_to_dict(s) for s in signals]
                 msg = format_scan_summary(summary_data)
@@ -244,7 +244,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "btn_top":
         await message.reply_text("⏳ Mencari top signals...")
         try:
-            signals = await scanner.scan_all(top_n=10)
+            signals = await scanner.scan_all()
             buy_signals = [s for s in signals if s.signal in ("BUY", "STRONG BUY")]
             if buy_signals:
                 summary_data = [scanner.signal_to_dict(s) for s in buy_signals[:10]]

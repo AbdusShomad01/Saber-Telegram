@@ -576,12 +576,11 @@ class ScoringEngine:
                                     reason=f"ADX skip — data {data_len} bar belum cukup warm-up")
 
         adx = technical.get("adx", 0) or 0
-        if adx < self.ADX_HARD_FILTER_THRESHOLD:
-            return HardFilterResult(
-                passed=False, category="adx",
-                reason=f"ADX too low ({adx:.1f}) — no trend detected (min {self.ADX_HARD_FILTER_THRESHOLD})"
-            )
-        return HardFilterResult(passed=True)
+        return HardFilterResult(
+            passed=True,
+            category="adx_scoring_only",
+            reason="ADX dinilai murni via scoring engine (tidak menggugurkan)",
+        )
 
     def _check_liquidity_filter(self, technical: Dict, ohlcv_df, timeframe: str = "1d", pure_technical: bool = False) -> HardFilterResult:
         """

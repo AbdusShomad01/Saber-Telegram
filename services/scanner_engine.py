@@ -365,11 +365,15 @@ class ScannerEngine:
                 final_signal = strategy_result["decision"]
                 final_confidence = int(strategy_result.get("confidence_score", 5))
 
-                # Pure technical guard: jika scoring deterministik menghasilkan BUY / WATCHLIST,
-                # jangan biarkan AI vision membunuh sinyal menjadi AVOID
-                if pure_technical and score_result.signal in ("BUY", "STRONG BUY", "WATCHLIST") and final_signal in ("AVOID", "SELL"):
-                    logger.info(f"[{ticker}] Pure Technical guard: LLM suggested {final_signal}, keeping technical signal {score_result.signal}")
+                # AI Guard (Pagi & Siang): jika scoring deterministik menghasilkan BUY / STRONG BUY / WATCHLIST,
+                # jangan biarkan AI vision membunuh sinyal menjadi AVOID atau SELL
+                if score_result.signal in ("BUY", "STRONG BUY", "WATCHLIST") and final_signal in ("AVOID", "SELL"):
+                    logger.info(
+                        f"[{ticker}] AI Guard: LLM suggested {final_signal}, "
+                        f"keeping deterministic signal {score_result.signal}"
+                    )
                     final_signal = score_result.signal
+                    final_confidence = max(final_confidence, score_result.confidence_score)
 
                 conf_label = "MEDIUM"
                 if final_confidence >= 8:
@@ -523,7 +527,7 @@ class ScannerEngine:
     # ------------------------------------------------------------------ #
     #  Parallel Full Scan
     # ------------------------------------------------------------------ #
-    async def scan_all(self, top_n: int = 10, override_interval: Optional[str] = None, pure_technical: bool = False) -> List[SignalOutput]:
+    async def scan_all(self, top_n: Optional[int] = None, override_interval: Optional[str] = None, pure_technical: bool = False) -> List[SignalOutput]:
         """Scan all stocks in the universe with parallel data fetching.
         
         - In pure_technical mode: Only technical indicators are evaluated (Noon screener).
@@ -604,12 +608,14 @@ class ScannerEngine:
             # Return empty list — scheduler akan kirim pesan "tidak ada saham yang memenuhi kriteria"
             return []
 
-        # Take top_n candidates — with SECTOR DIVERSIFICATION
-        # Max 3 saham per sektor agar tidak semua dari sektor yang sama
-        MAX_PER_SECTOR = 3
-        top_candidates = self._diversify_by_sector(results, top_n=top_n, max_per_sector=MAX_PER_SECTOR)
-
-        logger.info(f"[scan_all] Phase 2 complete. Taking top {len(top_candidates)} as LLM candidates (sector-diversified, max {MAX_PER_SECTOR}/sektor).")
+        # Hapus batasan kuota Top 10 dan maksimal 3 per sektor:
+        # Seluruh kandidat bullish hasil scoring Fase 2 diteruskan ke Fase 3 (LLM Strategy Agent)
+        if top_n is not None:
+            top_candidates = results[:top_n]
+            logger.info(f"[scan_all] Phase 2 complete. Taking top {len(top_candidates)} as LLM candidates (top_n={top_n}).")
+        else:
+            top_candidates = results
+            logger.info(f"[scan_all] Phase 2 complete. Taking all {len(top_candidates)} bullish stocks as LLM candidates (unlimited quota, no sector limit).")
 
         # ========== PHASE 3: LLM analysis (parallel with semaphore) ==========
         sem = asyncio.Semaphore(2)  # Max 2 concurrent LLM requests to respect Gemini 15 RPM limit

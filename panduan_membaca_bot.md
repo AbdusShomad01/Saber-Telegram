@@ -33,9 +33,14 @@ Sebelum saham dinilai (*scoring*), sistem menerapkan filter awal untuk membuang 
 3.  **Threshold Likuiditas**:
     *   **Daily (1d)**: Rata-rata volume 20 hari minimal **5.000 lot** (500.000 lembar) dan nilai transaksi rata-rata minimal **Rp 2 Miliar/hari** (dilonggarkan dari sebelumnya 10.000 lot & Rp 5 Miliar agar lebih banyak saham second-liner potensial tersaring).
     *   **Intraday (60m)**: Minimal 1.000 lot dan nilai transaksi Rp 1 Miliar.
-4.  **Filter Tren & Volatilitas**:
-    *   **ADX < 15**: Saham tanpa arah tren yang jelas dieleminasi.
+4.  **Filter Volatilitas & Tren**:
+    *   **ADX**: ADX dinilai secara berjenjang (0–3 poin) pada kategori *Trend & Momentum* dan **tidak lagi menggugurkan saham secara mutlak**. Saham yang sedang berada di fase akumulasi awal atau konsolidasi (*base building* sebelum *breakout*) tetap dapat lolos seleksi.
     *   **ATR > 7%**: Saham dengan volatilitas harian ekstrem dieliminasi demi keamanan manajemen risiko modal.
+
+> [!NOTE]
+> **Kebijakan Kuota & AI Guard Terbaru**:
+> - **Tanpa Batasan Kuota Top 10 & Sektor**: Seluruh saham yang memenuhi kriteria *bullish* (*STRONG BUY, BUY, WATCHLIST*) akan dikirimkan ke Telegram tanpa batasan maksimal 10 saham atau maksimal 3 saham per sektor.
+> - **AI Guard (Pagi & Siang)**: Sinyal teknikal/kuantitatif *BUY, STRONG BUY, atau WATCHLIST* dilindungi oleh *AI Guard* sehingga tidak akan dibatalkan/di-*downgrade* menjadi *AVOID* oleh AI Vision. Analisis visual AI tetap disajikan secara lengkap sebagai panduan catatan risiko.
 
 ---
 

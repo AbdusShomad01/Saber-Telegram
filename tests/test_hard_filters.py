@@ -64,10 +64,10 @@ class TestADXWarmUp:
         assert result.category == "adx_warmup_skip"
 
     def test_adx_filter_active_at_28_bar(self, engine):
-        """28 bar ke atas: filter harus aktif dan menggugurkan ADX rendah."""
+        """28 bar ke atas: ADX rendah tetap lolos Hard Filter (dinilai di scoring engine)."""
         result = engine._check_adx_filter(make_technical(adx=5.0), data_len=28)
-        assert result.passed is False
-        assert result.category == "adx"
+        assert result.passed is True
+        assert result.category == "adx_scoring_only"
 
     def test_adx_filter_passes_with_sufficient_data_and_high_adx(self, engine):
         """ADX 25 dengan data 60 bar harus lolos."""
@@ -82,11 +82,12 @@ class TestADXWarmUp:
 class TestADXThreshold:
     """Zona ADX 15-20 ('early_trend') harus lolos hard filter."""
 
-    def test_adx_14_gugur(self, engine):
-        """ADX 14 (di bawah 15) harus gugur."""
+    def test_adx_14_passes_filter_scores_zero(self, engine):
+        """ADX 14 (di bawah 15) tetap lolos Hard Filter, dinilai 0 poin di scoring."""
         result = engine._check_adx_filter(make_technical(adx=14.9), data_len=60)
-        assert result.passed is False
-        assert result.category == "adx"
+        assert result.passed is True
+        assert result.category == "adx_scoring_only"
+        assert engine.score_adx(14.9, 60)["score"] == 0
 
     def test_adx_15_lolos(self, engine):
         """ADX tepat 15 harus lolos (batas bawah baru)."""
@@ -330,13 +331,12 @@ class TestRunHardFilters:
         r = engine._run_hard_filters(tech, ohlcv, data_len=60)
         assert r.passed is True
 
-    def test_adx_fails_first(self, engine):
-        """ADX gugur sebelum filter lain dicek."""
+    def test_adx_low_does_not_fail_hard_filters(self, engine):
+        """ADX rendah (5.0) tidak lagi menggugurkan saham jika liquidity & ATR terpenuhi."""
         tech = make_technical(adx=5.0, atr_percent=3.0, volume_avg_20=10_000_000)
         ohlcv = make_ohlcv_df(avg_value=50_000_000_000)
         r = engine._run_hard_filters(tech, ohlcv, data_len=60)
-        assert r.passed is False
-        assert r.category == "adx"
+        assert r.passed is True
 
     def test_warmup_skip_then_check_volume(self, engine):
         """Saat warm-up, ADX di-skip. Jika volume kurang, volume yang gugur."""

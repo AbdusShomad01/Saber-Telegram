@@ -189,7 +189,7 @@ async def job_daily_scan():
 
     try:
         scanner = ScannerEngine()
-        signals = await scanner.scan_all(top_n=10)
+        signals = await scanner.scan_all()  # Unlimited quota: kirim semua sinyal bullish yang lolos
 
         from app.config import get_settings
         settings = get_settings()
@@ -320,7 +320,7 @@ async def job_intraday_scan(interval_override: str | None = None, pure_technical
 
     try:
         scanner = ScannerEngine()
-        signals = await scanner.scan_all(top_n=10, override_interval=interval_override, pure_technical=pure_technical)
+        signals = await scanner.scan_all(override_interval=interval_override, pure_technical=pure_technical)  # Unlimited quota
 
         if settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID:
             import os
