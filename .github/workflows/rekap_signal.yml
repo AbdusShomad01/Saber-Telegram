@@ -1,10 +1,7 @@
-name: 📊 Rekap Sinyal SPS (17:02 WIB Senin-Jumat)
+name: 📊 Rekap Sinyal SPS (Manual Only)
 
 on:
-  schedule:
-    # 17:02 WIB = 10:02 UTC (Senin - Jumat)
-    - cron: '2 10 * * 1-5'
-  workflow_dispatch: # Memungkinkan tombol 'Run workflow' manual kapan saja
+  workflow_dispatch: # Murni manual - Jadwal otomatis sudah dipindah ke VPS NEO
 
 permissions:
   contents: write
