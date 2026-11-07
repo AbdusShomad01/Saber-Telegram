@@ -26,6 +26,7 @@ Syarat wajib: harga di atas VWAP, EMA 9 di atas EMA 20, dan CLV minimal 0,75.
 import logging
 from datetime import date, datetime
 from typing import Optional, List, Dict, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import numpy as np
 
@@ -288,27 +289,34 @@ def compute_bsjp_score(
 
 def run_bsjp_screener(universe: List[str]) -> List[Dict[str, Any]]:
     """
-    Jalankan BSJP screener untuk seluruh universe.
+    Jalankan BSJP screener untuk seluruh universe secara paralel (ThreadPoolExecutor).
     Kembalikan daftar saham yang lolos (skor ≥ 70), diurutkan dari skor tertinggi.
     """
     ihsg_ret = _ihsg_return_today()
     results = []
-    for ticker in universe:
+    total = len(universe)
+    print(f"🔍 Mulai scanning {total} saham BSJP secara paralel...")
+
+    def _eval(ticker: str):
         try:
-            res = compute_bsjp_score(ticker, ihsg_ret=ihsg_ret)
-            if res["score"] >= 70:
-                results.append(res)
-                logger.info(
-                    f"[BSJP] {ticker} → score={res['score']} "
-                    f"ema={res['ema_ok']} vwap={res['vwap_ok']} "
-                    f"rsi={res['rsi_ok']} vol={res['volume_ok']} "
-                    f"clv={res['clv_ok']} rs={res['rs_ok']} candle={res['candle_ok']}"
-                )
-            else:
-                logger.debug(
-                    f"[BSJP] {ticker} SKIP score={res['score']} reason={res['reason']}"
-                )
+            return compute_bsjp_score(ticker, ihsg_ret=ihsg_ret)
         except Exception as e:
-            logger.error(f"[BSJP] Error on {ticker}: {e}", exc_info=True)
+            logger.debug(f"[BSJP] Error on {ticker}: {e}")
+            return None
+
+    completed = 0
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(_eval, t): t for t in universe}
+        for future in as_completed(futures):
+            completed += 1
+            res = future.result()
+            if res and res.get("score", 0) >= 70:
+                results.append(res)
+                print(f"  ⭐ {res['ticker']} LOLOS BSJP (Skor: {res['score']})")
+                logger.info(f"[BSJP] {res['ticker']} LOLOS score={res['score']}")
+            if completed % 20 == 0 or completed == total:
+                print(f"  ⏳ Progress: {completed}/{total} saham selesai diperiksa...")
+
     results.sort(key=lambda x: x["score"], reverse=True)
+    print(f"✅ Selesai! Ditemukan {len(results)} kandidat BSJP.")
     return results
