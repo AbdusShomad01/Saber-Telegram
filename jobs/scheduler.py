@@ -48,6 +48,9 @@ async def send_telegram_with_retry(bot, chat_id, text=None, photo=None, caption=
                     photo=photo,
                     caption=caption,
                     parse_mode=parse_mode,
+                    read_timeout=30.0,
+                    write_timeout=30.0,
+                    connect_timeout=30.0,
                 )
             else:
                 await bot.send_message(
@@ -55,6 +58,9 @@ async def send_telegram_with_retry(bot, chat_id, text=None, photo=None, caption=
                     message_thread_id=message_thread_id,
                     text=text,
                     parse_mode=parse_mode,
+                    read_timeout=30.0,
+                    write_timeout=30.0,
+                    connect_timeout=30.0,
                 )
             return True
         except Exception as e:
@@ -74,11 +80,37 @@ async def send_telegram_with_retry(bot, chat_id, text=None, photo=None, caption=
                     logger.error(f"Telegram send failed (message too long): {e}")
                     return False
             elif attempt < max_retries - 1:
-                wait = (2 ** attempt) * 2  # 2s, 4s, 8s
+                wait = (2 ** attempt) * 3  # 3s, 6s
                 logger.warning(f"Telegram send failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait}s...")
                 await asyncio.sleep(wait)
             else:
-                logger.error(f"Telegram send permanently failed after {max_retries} attempts: {e}")
+                logger.error(f"Telegram send permanently failed after {max_retries} attempts: {e}. Trying direct HTTP fallback...")
+                # Direct HTTP fallback via urllib
+                try:
+                    import urllib.request
+                    token = getattr(bot, "token", None)
+                    if token and text:
+                        def _direct_send():
+                            url = f"https://api.telegram.org/bot{token}/sendMessage"
+                            payload = {
+                                "chat_id": chat_id,
+                                "text": text,
+                                "parse_mode": parse_mode,
+                            }
+                            if message_thread_id:
+                                payload["message_thread_id"] = int(message_thread_id)
+                            req_data = json.dumps(payload).encode("utf-8")
+                            req = urllib.request.Request(
+                                url, data=req_data, headers={"Content-Type": "application/json"}
+                            )
+                            with urllib.request.urlopen(req, timeout=30) as resp:
+                                return resp.status == 200
+                        success = await asyncio.to_thread(_direct_send)
+                        if success:
+                            logger.info("Direct HTTP fallback sent successfully.")
+                            return True
+                except Exception as ex_direct:
+                    logger.error(f"Direct HTTP fallback also failed: {ex_direct}")
                 return False
     return False
 
@@ -893,7 +925,9 @@ async def job_bsjp_scan():
         msg = "\n".join(msg_lines)
 
         from telegram import Bot
-        bot = Bot(token=bsjp_token)
+        from telegram.request import HTTPXRequest
+        req_client = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0, write_timeout=30.0)
+        bot = Bot(token=bsjp_token, request=req_client)
         await send_telegram_with_retry(
             bot, bsjp_chat, text=msg, message_thread_id=bsjp_thread
         )
@@ -1040,7 +1074,9 @@ async def job_bsjp_rekap():
             msg = "\n".join(msg_lines)
 
         from telegram import Bot
-        bot = Bot(token=bsjp_token)
+        from telegram.request import HTTPXRequest
+        req_client = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0, write_timeout=30.0)
+        bot = Bot(token=bsjp_token, request=req_client)
         await send_telegram_with_retry(
             bot, bsjp_chat, text=msg, message_thread_id=bsjp_thread
         )
