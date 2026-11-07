@@ -160,7 +160,7 @@ def create_scheduler() -> AsyncIOScheduler:
     except Exception as e:
         logger.warning(f"[Scheduler] Outcome migration warning: {e}")
 
-    # Screener Pagi: Morning Pre-Market scan at 00:01 WIB (Senin-Jumat)
+    # ── Screener Pagi: Morning Pre-Market scan at 00:01 WIB (Senin-Jumat) ────
     scheduler.add_job(
         job_intraday_scan,
         CronTrigger(day_of_week="mon-fri", hour="0", minute="1", timezone="Asia/Jakarta"),
@@ -170,7 +170,34 @@ def create_scheduler() -> AsyncIOScheduler:
         kwargs={"interval_override": "1d"}
     )
 
-    # Catatan: Screener Siang (Noon Intraday) diset MANUAL via GitHub Actions / trigger manual
+    # ── Screener Siang: Noon Intraday Scan (15m - Pure Teknikal) ─────────────
+    # Senin - Kamis: 12:05 WIB (setelah Sesi 1 tutup jam 12:00)
+    scheduler.add_job(
+        job_intraday_scan,
+        CronTrigger(day_of_week="mon-thu", hour=12, minute=5, timezone="Asia/Jakarta"),
+        id="noon_scan_mon_thu",
+        name="Noon Intraday Scan 15m (Mon-Thu 12:05 WIB)",
+        replace_existing=True,
+        kwargs={"interval_override": "15m", "pure_technical": True}
+    )
+    # Jumat: 11:35 WIB (setelah Sesi 1 Jumat tutup jam 11:30)
+    scheduler.add_job(
+        job_intraday_scan,
+        CronTrigger(day_of_week="fri", hour=11, minute=35, timezone="Asia/Jakarta"),
+        id="noon_scan_fri",
+        name="Noon Intraday Scan 15m (Fri 11:35 WIB)",
+        replace_existing=True,
+        kwargs={"interval_override": "15m", "pure_technical": True}
+    )
+
+    # ── Real-Time TP/SL Monitor: Setiap 10 menit saat jam bursa (Senin-Jumat) ───
+    scheduler.add_job(
+        job_monitor_tp_sl,
+        CronTrigger(day_of_week="mon-fri", hour="9-16", minute="*/10", timezone="Asia/Jakarta"),
+        id="tp_sl_monitor",
+        name="Real-Time TP/SL Monitor (Every 10 min)",
+        replace_existing=True,
+    )
 
     # Signal tracking follow-up at 16:30 WIB (before market close)
     scheduler.add_job(
@@ -891,6 +918,19 @@ async def job_sps_recap():
 # ==================================================================
 
 # ================================================================== #
+
+# ================================================================== #
+#  Job: Real-Time TP/SL Signal Monitor (Setiap 10 menit saat bursa buka)
+# ================================================================== #
+
+async def job_monitor_tp_sl():
+    """Real-Time TP/SL Signal Monitor during market hours."""
+    try:
+        from run_monitor_tp_sl import monitor_signals
+        await monitor_signals(force=False)
+    except Exception as e:
+        logger.error(f"[Scheduler] Error running TP/SL monitor: {e}", exc_info=True)
+
 
 # ================================================================== #
 #  Job: BSJP Scan — Beli Sore Jual Profit (15:45 WIB)
