@@ -235,7 +235,9 @@ class ScannerEngine:
             settings = get_settings()
             interval = override_interval if override_interval else settings.CHART_INTERVAL
             period_days = 365
-            if interval in ["15m", "60m", "1h", "60"]:
+            if interval in ["15m", "30m"]:
+                period_days = 60
+            elif interval in ["60m", "1h", "60"]:
                 interval = "60m"
                 period_days = 120
 
@@ -555,7 +557,9 @@ class ScannerEngine:
 
         interval = override_interval if override_interval else settings.CHART_INTERVAL
         period_days = 365
-        if interval in ["15m", "60m", "1h", "60"]:
+        if interval in ["15m", "30m"]:
+            period_days = 60
+        elif interval in ["60m", "1h", "60"]:
             interval = "60m"
             period_days = 120
 

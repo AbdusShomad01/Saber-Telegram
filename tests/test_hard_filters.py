@@ -347,5 +347,104 @@ class TestRunHardFilters:
         assert r.category == "volume"
 
 
+# ─────────────────────────────────────────────
+#  ARA Filter (Auto Rejection Atas)
+# ─────────────────────────────────────────────
+
+class TestARAFilter:
+    """Saham yang sudah ARA atau hampir menyentuh batas ARA harus digugurkan."""
+
+    def test_ara_exact_hit_fails(self, engine):
+        """Saham harga 1000 (batas 25%, ARA=1250) jika close 1250 harus gugur."""
+        ohlcv = pd.DataFrame({
+            "close": [1000.0, 1250.0],
+            "high":  [1000.0, 1250.0],
+        })
+        r = engine._check_ara_filter(ohlcv, timeframe="1d")
+        assert r.passed is False
+        assert r.category == "ara_limit"
+        assert "sudah" in r.reason.lower()
+
+    def test_ara_high_intraday_hit_fails(self, engine):
+        """Saham yang high-nya menyentuh ARA (meski close sedikit turun) harus gugur."""
+        ohlcv = pd.DataFrame({
+            "close": [1000.0, 1230.0],
+            "high":  [1000.0, 1250.0],
+        })
+        r = engine._check_ara_filter(ohlcv, timeframe="1d")
+        assert r.passed is False
+        assert r.category == "ara_limit"
+
+    def test_near_ara_fails(self, engine):
+        """Saham naik +22% (dari batas 25%, sisa ke ARA < 3.5%) harus gugur."""
+        ohlcv = pd.DataFrame({
+            "close": [1000.0, 1220.0],
+            "high":  [1000.0, 1220.0],
+        })
+        r = engine._check_ara_filter(ohlcv, timeframe="1d")
+        assert r.passed is False
+        assert r.category == "ara_limit"
+        assert "hampir" in r.reason.lower()
+
+    def test_moderate_gain_passes(self, engine):
+        """Saham dengan gain wajar (+7%) harus lolos."""
+        ohlcv = pd.DataFrame({
+            "close": [1000.0, 1070.0],
+            "high":  [1000.0, 1075.0],
+        })
+        r = engine._check_ara_filter(ohlcv, timeframe="1d")
+        assert r.passed is True
+
+    def test_intraday_15m_ara_grouped(self, engine):
+        """Intraday 15m: harus memisahkan tanggal hari ini vs kemarin dan mendeteksi ARA."""
+        dates = (
+            [pd.Timestamp("2026-11-06 15:45:00")] * 4 +
+            [pd.Timestamp("2026-11-07 10:00:00"), pd.Timestamp("2026-11-07 11:30:00")]
+        )
+        closes = [100.0, 100.0, 100.0, 100.0, 130.0, 134.0]  # Saham 100 -> ARA 35% (135)
+        highs = [100.0, 100.0, 100.0, 100.0, 130.0, 134.0]
+        ohlcv = pd.DataFrame({"date": dates, "close": closes, "high": highs})
+        r = engine._check_ara_filter(ohlcv, timeframe="15m")
+        assert r.passed is False
+        assert r.category == "ara_limit"
+
+
+# ─────────────────────────────────────────────
+#  Intraday Tightened Liquidity & Min Price
+# ─────────────────────────────────────────────
+
+class TestIntradayTightenedFilters:
+    """Verifikasi pengetatan likuiditas dan harga minimal untuk intraday (15m)."""
+
+    def test_intraday_min_price_50_fails(self, engine):
+        """Saham harga 45 di intraday 15m harus gugur (min price 50)."""
+        ohlcv = pd.DataFrame({"close": [45.0, 45.0]})
+        r = engine._check_min_price_filter(ohlcv, timeframe="15m")
+        assert r.passed is False
+        assert r.category == "min_price"
+
+    def test_intraday_min_price_55_passes(self, engine):
+        """Saham harga 55 di intraday 15m harus lolos."""
+        ohlcv = pd.DataFrame({"close": [55.0, 55.0]})
+        r = engine._check_min_price_filter(ohlcv, timeframe="15m")
+        assert r.passed is True
+
+    def test_intraday_volume_tightened_to_200k(self, engine):
+        """Volume 150.000 lembar gugur di intraday (karena min 200.000)."""
+        tech = make_technical(volume_avg_20=150_000)
+        ohlcv = make_ohlcv_df(avg_value=5_000_000_000)
+        r = engine._check_liquidity_filter(tech, ohlcv, timeframe="15m")
+        assert r.passed is False
+        assert r.category == "volume"
+
+    def test_intraday_value_tightened_to_2b(self, engine):
+        """Value Rp 1.5 Miliar gugur di intraday (karena min Rp 2 Miliar)."""
+        tech = make_technical(volume_avg_20=500_000)
+        ohlcv = make_ohlcv_df(avg_value=1_500_000_000)
+        r = engine._check_liquidity_filter(tech, ohlcv, timeframe="15m")
+        assert r.passed is False
+        assert r.category == "value"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

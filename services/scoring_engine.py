@@ -36,6 +36,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional
 import pandas as pd
+import numpy as np
+import math
 
 from app.config import get_settings
 from services.regime_engine import apply_ihsg_regime_adjustment
@@ -141,8 +143,9 @@ class FilterFunnelStats:
     failed_hard_filter: int = 0
     passed_to_signal: int = 0       # STRONG BUY + BUY + WATCHLIST
     # -- Breakdown Hard Filter --
-    gugur_min_price: int = 0        # Harga <= Rp 10
+    gugur_min_price: int = 0        # Harga <= Rp 10 (Daily) / Rp 50 (Intraday)
     gugur_prev_day_surge: int = 0   # Naik > 15% di hari sebelumnya
+    gugur_ara: int = 0              # Sudah atau hampir menyentuh ARA
     gugur_adx: int = 0              # ADX < 15
     gugur_atr: int = 0              # ATR > 7%
     gugur_volume: int = 0           # hanya gagal volume lot
@@ -166,12 +169,13 @@ class FilterFunnelStats:
             f"  Total saham diproses : {self.total_stocks}\n"
             f"  Lolos Hard Filter    : {self.passed_hard_filter} ({hf_pct:.1f}%)\n"
             f"  Gugur Hard Filter    : {self.failed_hard_filter}\n"
-            f"  ├─ Harga <= Rp 10    : {self.gugur_min_price}\n"
+            f"  ├─ Harga di bawah min: {self.gugur_min_price}\n"
             f"  ├─ Naik > 15% Kemarin: {self.gugur_prev_day_surge}\n"
+            f"  ├─ Sudah/Hampir ARA  : {self.gugur_ara}\n"
             f"  ├─ ADX < 15          : {self.gugur_adx}\n"
             f"  ├─ ATR > 7%          : {self.gugur_atr}\n"
-            f"  ├─ Volume < 5Rb lot  : {self.gugur_volume}\n"
-            f"  ├─ Value < 2M IDR    : {self.gugur_value}\n"
+            f"  ├─ Volume kurang     : {self.gugur_volume}\n"
+            f"  ├─ Value kurang      : {self.gugur_value}\n"
             f"  └─ Volume & Value    : {self.gugur_volume_dan_value}\n"
             f"  Lolos ke Sinyal      : {self.passed_to_signal} ({sig_pct:.1f}%)\n"
             f"  ├─ STRONG BUY : {self.strong_buy_count}\n"
@@ -310,6 +314,7 @@ class ScoringEngine:
             cat = hf_result.category
             if cat == "min_price":          self._scan_stats.gugur_min_price += 1
             elif cat == "prev_day_surge":   self._scan_stats.gugur_prev_day_surge += 1
+            elif cat == "ara_limit":        self._scan_stats.gugur_ara += 1
             elif cat == "adx":              self._scan_stats.gugur_adx += 1
             elif cat == "atr":             self._scan_stats.gugur_atr += 1
             elif cat == "volume":          self._scan_stats.gugur_volume += 1
@@ -492,30 +497,128 @@ class ScoringEngine:
     ADX_WARMUP_DAYS           = 28   # Wilder's smoothing butuh ~28 bar untuk stabil
     MIN_AVG_VOLUME_LOT        = 500_000         # 500 ribu lembar (~5.000 lot) untuk daily
     MIN_AVG_VALUE_IDR         = 2_000_000_000   # Rp 2 miliar untuk daily
-    MIN_AVG_VOLUME_LOT_INTRADAY = 100_000       # 100 ribu lembar (~1.000 lot) untuk intraday
-    MIN_AVG_VALUE_IDR_INTRADAY  = 1_000_000_000 # Rp 1 miliar untuk intraday
+    MIN_AVG_VOLUME_LOT_INTRADAY = 200_000       # 200 ribu lembar (~2.000 lot) untuk intraday (diperketat dari 100k)
+    MIN_AVG_VALUE_IDR_INTRADAY  = 2_000_000_000 # Rp 2 miliar untuk intraday (diperketat dari 1M)
     MAX_ATR_PCT               = 7.0  # %
     MAX_PREV_DAY_GAIN_PCT     = 15.0 # % (saham naik > 15% di hari sebelumnya dikeluarkan)
     MIN_PRICE                 = 10.0 # Rp (saham > 10 tetap dimasukkan, <= 10 dikeluarkan)
+    MIN_PRICE_INTRADAY        = 50.0 # Rp (intraday: saham <= 50 dikeluarkan karena risiko FCA / illiquid)
 
-    def _check_min_price_filter(self, ohlcv_df) -> HardFilterResult:
+    def _check_min_price_filter(self, ohlcv_df, timeframe: str = "1d") -> HardFilterResult:
         """
-        Filter harga minimal: saham dengan harga > 10 tetap dimasukkan.
-        Saham <= 10 dikeluarkan karena risiko likuiditas macet / delisting ekstrim.
+        Filter harga minimal:
+        - Daily: harga > 10 tetap dimasukkan, <= 10 dikeluarkan.
+        - Intraday (15m/60m): harga > 50 dimasukkan, <= 50 dikeluarkan (hindari saham gocap/FCA).
         """
         if settings.DATA_PROVIDER == "mock" or ohlcv_df is None or len(ohlcv_df) == 0:
             return HardFilterResult(passed=True)
 
         try:
-            last_price = ohlcv_df["close"].iloc[-1]
-            if last_price <= self.MIN_PRICE:
+            last_price = float(ohlcv_df["close"].iloc[-1])
+            is_intraday = (timeframe in ["15m", "60m", "1h", "60"])
+            min_p = self.MIN_PRICE_INTRADAY if is_intraday else self.MIN_PRICE
+            if last_price <= min_p:
                 return HardFilterResult(
                     passed=False,
                     category="min_price",
-                    reason=f"Harga saham Rp{last_price:.0f} <= Rp{self.MIN_PRICE:.0f} (terlalu rendah)"
+                    reason=f"Harga saham Rp{last_price:.0f} <= Rp{min_p:.0f} (terlalu rendah untuk {'intraday' if is_intraday else 'pasar'})"
                 )
         except Exception as e:
             logger.warning(f"[HardFilter] Gagal mengecek min_price: {e}")
+
+        return HardFilterResult(passed=True)
+
+    def _check_ara_filter(self, ohlcv_df, timeframe: str = "1d") -> HardFilterResult:
+        """
+        Filter tolak saham yang sudah ARA atau hampir menyentuh batas ARA (Auto Rejection Atas).
+        Batas ARA BEI Simetris:
+          - Harga <= Rp 200: 35%
+          - Rp 200 < Harga <= Rp 5.000: 25%
+          - Harga > Rp 5.000: 20%
+        Saham yang sudah ARA atau sisa ruang kenaikan < 3.5% (atau gain >= 85% dari batas ARA)
+        ditolak karena risiko rejection/climax selling dan Risk:Reward sangat buruk.
+        """
+        if settings.DATA_PROVIDER == "mock" or ohlcv_df is None or len(ohlcv_df) < 2:
+            return HardFilterResult(passed=True)
+
+        try:
+            prev_close = 0.0
+            current_price = float(ohlcv_df["close"].iloc[-1])
+            high_today = float(ohlcv_df["high"].iloc[-1])
+
+            if timeframe == "1d" or "date" not in ohlcv_df.columns:
+                prev_close = float(ohlcv_df["close"].iloc[-2])
+                high_today = float(ohlcv_df["high"].iloc[-1])
+            else:
+                # Intraday (15m / 60m): Pisahkan bar hari ini vs kemarin
+                dates = pd.to_datetime(ohlcv_df["date"]).dt.date
+                unique_dates = dates.unique()
+                if len(unique_dates) >= 2:
+                    today_date = unique_dates[-1]
+                    prev_date = unique_dates[-2]
+                    today_bars = ohlcv_df[dates == today_date]
+                    prev_bars = ohlcv_df[dates == prev_date]
+                    if not prev_bars.empty and not today_bars.empty:
+                        prev_close = float(prev_bars["close"].iloc[-1])
+                        high_today = float(today_bars["high"].max())
+                    else:
+                        prev_close = float(ohlcv_df["close"].iloc[-2])
+                else:
+                    prev_close = float(ohlcv_df["close"].iloc[-2])
+
+            if prev_close <= 0 or current_price <= 0:
+                return HardFilterResult(passed=True)
+
+            # 1. Tentukan persentase batas ARA berdasarkan regulasi BEI
+            if prev_close <= 200:
+                ara_pct = 35.0
+            elif prev_close <= 5000:
+                ara_pct = 25.0
+            else:
+                ara_pct = 20.0
+
+            # 2. Hitung harga ARA teoritis dengan pembulatan fraksi tick BEI (floor)
+            if prev_close < 200:
+                tick = 1.0
+            elif prev_close < 500:
+                tick = 2.0
+            elif prev_close < 2000:
+                tick = 5.0
+            elif prev_close < 5000:
+                tick = 10.0
+            else:
+                tick = 25.0
+
+            ara_raw = prev_close * (1.0 + ara_pct / 100.0)
+            ara_price = np.floor(ara_raw / tick) * tick
+
+            gain_today = ((current_price - prev_close) / prev_close) * 100.0
+            high_gain_today = ((high_today - prev_close) / prev_close) * 100.0
+
+            # 3. Kriteria Penolakan (Sudah ARA atau Hampir Menyentuh ARA)
+            # A. Sudah menyentuh / lock ARA:
+            if current_price >= ara_price or high_today >= ara_price:
+                return HardFilterResult(
+                    passed=False,
+                    category="ara_limit",
+                    reason=f"Saham sudah menyentuh/terkunci ARA (+{high_gain_today:.1f}% vs batas ARA +{ara_pct:.0f}%, max Rp{ara_price:,.0f}) — rawan profit taking ekstrim"
+                )
+
+            # B. Hampir menyentuh ARA:
+            # - Sisa kenaikan ke harga ARA <= 3.5%
+            # - Atau gain saat ini sudah >= 85% dari batas ARA (misal 35% -> >= 29.75%, 25% -> >= 21.25%, 20% -> >= 17%)
+            pct_to_ara = ((ara_price - current_price) / ara_price) * 100.0
+            ratio_to_ara = gain_today / ara_pct if ara_pct > 0 else 0
+
+            if pct_to_ara <= 3.5 or ratio_to_ara >= 0.85:
+                return HardFilterResult(
+                    passed=False,
+                    category="ara_limit",
+                    reason=f"Saham hampir menyentuh ARA (+{gain_today:.1f}% vs batas ARA +{ara_pct:.0f}%, sisa ke ARA {pct_to_ara:.1f}%) — upside terbatas & R:R buruk"
+                )
+
+        except Exception as e:
+            logger.warning(f"[HardFilter] Gagal mengecek ara_filter: {e}")
 
         return HardFilterResult(passed=True)
 
@@ -644,8 +747,9 @@ class ScoringEngine:
         Urutan: ADX → Liquidity (Volume+Value) → ATR
         """
         for check_fn in [
-            lambda: self._check_min_price_filter(ohlcv_df),
+            lambda: self._check_min_price_filter(ohlcv_df, timeframe=timeframe),
             lambda: self._check_prev_day_gain_filter(ohlcv_df, timeframe=timeframe),
+            lambda: self._check_ara_filter(ohlcv_df, timeframe=timeframe),
             lambda: self._check_adx_filter(technical, data_len),
             lambda: self._check_liquidity_filter(technical, ohlcv_df, timeframe=timeframe, pure_technical=pure_technical),
             lambda: self._check_atr_filter(technical),
@@ -794,45 +898,60 @@ class ScoringEngine:
             rules.append(RuleResult("+DI > -DI", 2, 2, cat,
                                     "Directional bullish (+DI lebih besar dari -DI)"))
 
-        # --- RSI scoring berdasarkan Indicator Power Ranking ---
-        # Data WR: RSI 60-65 = 83.3% (#3), RSI >70 = 72.7% (#11),
-        #          RSI 45-50 = 70.6% (#15), RSI 55-60 = 55.9% (#28),
-        #          RSI 50-55 = 55.6% (#29), RSI 65-70 = 64.3% (#20)
-        rsi = t.get("rsi", 50)
-        if rsi and rsi < 30:
-            # RSI Oversold HANYA dapat poin jika ada konfirmasi candle reversal bullish.
-            # Tanpa konfirmasi, RSI < 30 sering berarti "falling knife", bukan bounce.
-            has_reversal_candle = t.get("bullish_engulfing") or t.get("hammer") or t.get("morning_star")
-            if has_reversal_candle:
-                rules.append(RuleResult("RSI Oversold + Candle Reversal", 4, 4, cat,
-                                        f"RSI {rsi:.0f} + konfirmasi candle bullish — strong bounce setup"))
-            else:
-                # Tetap catat sebagai informasi tapi tidak dapat poin
-                logger.debug(f"[Scoring] RSI oversold ({rsi:.0f}) tapi tidak ada konfirmasi candle — skip bonus")
-        elif rsi and 60 <= rsi <= 65:
-            # RSI 60-65 (Bullish): WR 83.3% — rank #3, salah satu indikator terkuat
-            rules.append(RuleResult("RSI Bullish Zone (60-65)", 4, 4, cat,
-                                    f"RSI {rsi:.0f} — zona bullish kuat (WR 83.3%)"))
-        elif rsi and 65 < rsi <= 70:
-            # RSI 65-70 (Strong bullish): WR 64.3%
-            rules.append(RuleResult("RSI Strong Bullish (65-70)", 3, 4, cat,
-                                    f"RSI {rsi:.0f} — zona bullish kuat (WR 64.3%)"))
-        elif rsi and rsi > 70:
-            # RSI >70 (Overbought): WR 72.7% — data menunjukkan masih positif!
-            rules.append(RuleResult("RSI Overbought Zone", 2, 4, cat,
-                                    f"RSI {rsi:.0f} — overbought tapi momentum kuat (WR 72.7%)"))
-        elif rsi and 45 <= rsi < 50:
-            # RSI 45-50 (Neutral-low): WR 70.6%
-            rules.append(RuleResult("RSI Neutral-Low (45-50)", 2, 2, cat,
-                                    f"RSI {rsi:.0f} — zona neutral-low (WR 70.6%)"))
-        elif rsi and 40 <= rsi < 45:
-            # RSI 40-45: below neutral, less favorable
-            rules.append(RuleResult("RSI Low Zone", 1, 2, cat,
-                                    f"RSI {rsi:.0f} (neutral-low)"))
-        elif rsi and 50 <= rsi <= 60:
-            # RSI 50-60 (Neutral): WR ~55-56%
-            rules.append(RuleResult("RSI Neutral Zone", 2, 2, cat,
-                                    f"RSI {rsi:.0f} (healthy)"))
+        # --- RSI Scoring Sesuai 4 Logika Spesifik User ---
+        # 1. If RSI > 80 dan konsisten > 80 selama 4 periode = + poin (+4)
+        # 2. If RSI > 80 dan ada pembalikan arah ke < 80 = - poin (-4)
+        # 3. If RSI < 30 dan konsisten < 30 selama 4 periode = - poin (-4)
+        # 4. If RSI < 30 dan ada pembalikan arah ke > 30 = + poin (+4)
+        rsi = t.get("rsi")
+        rsi_consistent_above_80 = t.get("rsi_consistent_above_80", False)
+        rsi_reversal_down_80 = t.get("rsi_reversal_down_from_80", False)
+        rsi_consistent_below_30 = t.get("rsi_consistent_below_30", False)
+        rsi_reversal_up_30 = t.get("rsi_reversal_up_from_30", False)
+
+        # Fallback check jika t hanya dipanggil dengan nilai float rsi & rsi_prev (tanpa precomputed flags)
+        if rsi is not None and not (rsi_consistent_above_80 or rsi_reversal_down_80 or rsi_consistent_below_30 or rsi_reversal_up_30):
+            rsi_prev = t.get("rsi_prev")
+            rsi_last_4 = t.get("rsi_last_4", [])
+            if len(rsi_last_4) == 4 and all(x > 80.0 for x in rsi_last_4):
+                rsi_consistent_above_80 = True
+            elif len(rsi_last_4) == 4 and all(x < 30.0 for x in rsi_last_4):
+                rsi_consistent_below_30 = True
+            elif rsi_prev is not None and rsi_prev >= 80.0 and rsi < 80.0:
+                rsi_reversal_down_80 = True
+            elif rsi_prev is not None and rsi_prev <= 30.0 and rsi > 30.0:
+                rsi_reversal_up_30 = True
+
+        if rsi_consistent_above_80:
+            rules.append(RuleResult(
+                "RSI Super Momentum (>80 x4)", 4, 4, cat,
+                f"RSI {rsi:.1f} konsisten >80 selama 4 periode — super bullish momentum"
+            ))
+        elif rsi_reversal_down_80:
+            rules.append(RuleResult(
+                "RSI Overbought Reversal (<80)", -4, 4, cat,
+                f"RSI {rsi:.1f} pembalikan arah turun ke <80 — sinyal koreksi/taking profit"
+            ))
+        elif rsi_consistent_below_30:
+            rules.append(RuleResult(
+                "RSI Persistent Oversold (<30 x4)", -4, 4, cat,
+                f"RSI {rsi:.1f} konsisten <30 selama 4 periode — tekanan jual ekstrem (falling knife)"
+            ))
+        elif rsi_reversal_up_30:
+            rules.append(RuleResult(
+                "RSI Oversold Reversal (>30)", 4, 4, cat,
+                f"RSI {rsi:.1f} pembalikan arah naik ke >30 — konfirmasi rebound / bullish bounce"
+            ))
+        elif rsi is not None and 50.0 <= rsi < 80.0:
+            rules.append(RuleResult(
+                "RSI Healthy Bullish Zone", 2, 4, cat,
+                f"RSI {rsi:.1f} — tren bullish sehat"
+            ))
+        elif rsi is not None and 40.0 <= rsi < 50.0:
+            rules.append(RuleResult(
+                "RSI Neutral Zone", 1, 2, cat,
+                f"RSI {rsi:.1f} — zona netral"
+            ))
         if t.get("rsi_divergence") == "bullish":
             rules.append(RuleResult("RSI Bullish Divergence", 2, 2, cat,
                                     "Price LL, RSI HL"))

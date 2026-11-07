@@ -44,7 +44,7 @@ jobs:
             echo "DATA_PROVIDER=yfinance" >> .env
           fi
 
-      - name: 🚀 Run Manual Noon Scan (60m)
+      - name: 🚀 Run Manual Noon Scan (15m)
         run: python run_intraday_now.py
 
       - name: 💾 Commit & Push Database Changes

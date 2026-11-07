@@ -260,6 +260,41 @@ def test_score_adx_logic():
     print("  [OK] score_adx logic (warm-up, boundaries, overextended penalty) passed")
 
 
+def test_rsi_four_new_rules():
+    """Test 4 kondisi baru logika RSI."""
+    engine = ScoringEngine()
+
+    # Rule 1: RSI > 80 konsisten 4 periode -> +4 poin
+    t1 = {"rsi": 84.0, "rsi_consistent_above_80": True}
+    rules1 = engine._score_trend_momentum(t1)
+    r1 = next((r for r in rules1 if "RSI Super Momentum" in r.name), None)
+    assert r1 is not None, "Rule 1 tidak ditemukan"
+    assert r1.score == 4
+
+    # Rule 2: RSI > 80 pembalikan arah ke < 80 -> -4 poin
+    t2 = {"rsi": 77.0, "rsi_prev": 82.0, "rsi_reversal_down_from_80": True}
+    rules2 = engine._score_trend_momentum(t2)
+    r2 = next((r for r in rules2 if "RSI Overbought Reversal" in r.name), None)
+    assert r2 is not None, "Rule 2 tidak ditemukan"
+    assert r2.score == -4
+
+    # Rule 3: RSI < 30 konsisten 4 periode -> -4 poin
+    t3 = {"rsi": 24.0, "rsi_consistent_below_30": True}
+    rules3 = engine._score_trend_momentum(t3)
+    r3 = next((r for r in rules3 if "RSI Persistent Oversold" in r.name), None)
+    assert r3 is not None, "Rule 3 tidak ditemukan"
+    assert r3.score == -4
+
+    # Rule 4: RSI < 30 pembalikan arah ke > 30 -> +4 poin
+    t4 = {"rsi": 33.0, "rsi_prev": 27.0, "rsi_reversal_up_from_30": True}
+    rules4 = engine._score_trend_momentum(t4)
+    r4 = next((r for r in rules4 if "RSI Oversold Reversal" in r.name), None)
+    assert r4 is not None, "Rule 4 tidak ditemukan"
+    assert r4.score == 4
+
+    print("  [OK] 4 aturan baru logika RSI (Super Momentum, Overbought Reversal, Falling Knife, Bullish Rebound) passed")
+
+
 if __name__ == "__main__":
     tests = [
         test_weights_sum_free,

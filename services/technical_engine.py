@@ -108,13 +108,49 @@ class TechnicalEngine:
         avg_loss = loss.rolling(window=period, min_periods=period).mean()
 
         rs = avg_gain / avg_loss.replace(0, np.nan)
-        rsi = 100 - (100 / (1 + rs))
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+        # Handle zero loss (runaway uptrend -> RSI 100) vs zero gain (runaway downtrend -> RSI 0)
+        rsi = rsi.fillna(pd.Series(np.where(avg_gain > 0, 100.0, 50.0), index=close.index))
 
         current_rsi = rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 50.0
 
+        # Deteksi 4 kondisi khusus RSI:
+        # 1. RSI > 80 konsisten selama 4 periode
+        # 2. RSI > 80 lalu ada pembalikan arah ke < 80
+        # 3. RSI < 30 konsisten selama 4 periode
+        # 4. RSI < 30 lalu ada pembalikan arah ke > 30
+        rsi_clean = rsi.dropna()
+        rsi_last_4 = [round(float(x), 2) for x in rsi_clean.iloc[-4:]] if len(rsi_clean) >= 4 else []
+        rsi_prev = round(float(rsi_clean.iloc[-2]), 2) if len(rsi_clean) > 1 else None
+
+        rsi_consistent_above_80 = (len(rsi_last_4) == 4 and all(x > 80.0 for x in rsi_last_4))
+
+        rsi_reversal_down_from_80 = False
+        if len(rsi_clean) >= 2:
+            if current_rsi < 80.0 and (
+                (rsi_prev is not None and rsi_prev >= 80.0) or
+                (len(rsi_clean) >= 3 and any(x >= 80.0 for x in rsi_clean.iloc[-3:-1]) and current_rsi < rsi_clean.iloc[-2])
+            ):
+                rsi_reversal_down_from_80 = True
+
+        rsi_consistent_below_30 = (len(rsi_last_4) == 4 and all(x < 30.0 for x in rsi_last_4))
+
+        rsi_reversal_up_from_30 = False
+        if len(rsi_clean) >= 2:
+            if current_rsi > 30.0 and (
+                (rsi_prev is not None and rsi_prev <= 30.0) or
+                (len(rsi_clean) >= 3 and any(x <= 30.0 for x in rsi_clean.iloc[-3:-1]) and current_rsi > rsi_clean.iloc[-2])
+            ):
+                rsi_reversal_up_from_30 = True
+
         return {
             "rsi": round(current_rsi, 2),
-            "rsi_prev": round(rsi.iloc[-2], 2) if len(rsi) > 1 and not pd.isna(rsi.iloc[-2]) else None,
+            "rsi_prev": rsi_prev,
+            "rsi_last_4": rsi_last_4,
+            "rsi_consistent_above_80": rsi_consistent_above_80,
+            "rsi_reversal_down_from_80": rsi_reversal_down_from_80,
+            "rsi_consistent_below_30": rsi_consistent_below_30,
+            "rsi_reversal_up_from_30": rsi_reversal_up_from_30,
             "rsi_overbought": current_rsi > 70,
             "rsi_oversold": current_rsi < 30,
             "rsi_bullish_zone": 40 <= current_rsi <= 60,

@@ -17,6 +17,6 @@ load_dotenv()
 from jobs.scheduler import job_intraday_scan
 
 if __name__ == "__main__":
-    print("☀️ Running manual noon intraday scan (60m — Pure Teknikal) and sending signals to Telegram...")
-    asyncio.run(job_intraday_scan(interval_override="60m", pure_technical=True))
+    print("☀️ Running manual noon intraday scan (15m — Pure Teknikal) and sending signals to Telegram...")
+    asyncio.run(job_intraday_scan(interval_override="15m", pure_technical=True))
     print("✅ Noon intraday pure technical scan completed!")

@@ -6,6 +6,7 @@ Supports: mock (for testing), csv, yfinance API.
 
 import logging
 import threading
+import time
 from datetime import date, timedelta
 from typing import Optional
 
@@ -74,9 +75,18 @@ class DataProviderService:
             start_date = end_date - timedelta(days=period_days)
 
         cache_key = (ticker, start_date, end_date, interval)
+        now_ts = time.time()
+        # TTL: 5 menit untuk intraday agar data sesi berjalan selalu fresh; 1 jam untuk daily
+        ttl = 300 if interval in ["1m", "5m", "15m", "30m", "60m", "1h"] else 3600
         if cache_key in DataProviderService._ohlcv_cache:
-            logger.debug(f"Using cached OHLCV for {ticker}")
-            return DataProviderService._ohlcv_cache[cache_key].copy()
+            cached_val = DataProviderService._ohlcv_cache[cache_key]
+            if isinstance(cached_val, tuple):
+                cached_df, cached_time = cached_val
+                if now_ts - cached_time < ttl:
+                    logger.debug(f"Using cached OHLCV for {ticker} (age: {now_ts - cached_time:.1f}s)")
+                    return cached_df.copy()
+            else:
+                return cached_val.copy()
 
         if self.provider == "yfinance":
             df = self._fetch_yfinance(ticker, start_date, end_date, interval)
@@ -86,7 +96,7 @@ class DataProviderService:
             df = self._generate_mock_ohlcv(ticker, start_date, end_date, interval)
 
         if not df.empty:
-            DataProviderService._ohlcv_cache[cache_key] = df
+            DataProviderService._ohlcv_cache[cache_key] = (df, now_ts)
 
         return df
 
@@ -100,25 +110,24 @@ class DataProviderService:
             else:
                 yf_ticker = f"{ticker}.JK"
                 
-            import time
             import random
             
             # Anti rate-limit delay
             time.sleep(random.uniform(0.5, 1.5))
             
-            # Intraday limits: 1m max 7d, 5m/15m/30m max 60d, 60m/1h max 730d
+            # Intraday limits: 1m max 7d, 5m/15m/30m/60m/1h max 60d
             if interval in ["1m", "5m", "15m", "30m", "60m", "1h"]:
                 if interval == "1m":
                     period = "7d"
                     with _YFINANCE_DOWNLOAD_LOCK:
                         data = yf.download(yf_ticker, period=period, interval=interval, progress=False)
-                elif interval in ["5m", "15m", "30m"]:
+                elif interval in ["5m", "15m", "30m", "60m", "1h"]:
                     period = "60d"
                     with _YFINANCE_DOWNLOAD_LOCK:
                         data = yf.download(yf_ticker, period=period, interval=interval, progress=False)
                 else:
                     with _YFINANCE_DOWNLOAD_LOCK:
-                        data = yf.download(yf_ticker, start=str(start), end=str(end), interval=interval, progress=False)
+                        data = yf.download(yf_ticker, period="60d", interval=interval, progress=False)
             else:
                 with _YFINANCE_DOWNLOAD_LOCK:
                     data = yf.download(yf_ticker, start=str(start), end=str(end), interval=interval, progress=False)

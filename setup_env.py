@@ -52,3 +52,4 @@ with open(out, "wb") as f:
 
 print(f"[OK] .env berhasil dibuat di: {out}")
 print("[CEK] TELEGRAM_BOT_TOKEN =", open(out).read().split("TELEGRAM_BOT_TOKEN=")[1].split("\n")[0])
+

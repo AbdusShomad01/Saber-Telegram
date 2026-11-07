@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     TELEGRAM_CHAT_ID: str = ""
     TELEGRAM_MESSAGE_THREAD_ID: Optional[str] = None
 
+    # --- BSJP Telegram (Beli Sore Jual Profit) ---
+    BSJP_BOT_TOKEN: str = "9261989934:AAFO3q5Bs32pp4ElVyxYf-VufWaYj66rwPo"
+    BSJP_CHAT_ID: str = "-1004302595573"
+    BSJP_THREAD_ID: Optional[int] = 107
+
     # --- LLM API Keys ---
     CLAUDE_API_KEY: str = ""
     GEMINI_API_KEY: str = ""

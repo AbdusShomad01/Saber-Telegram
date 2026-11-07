@@ -175,6 +175,24 @@ def create_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
     )
 
+    # ── BSJP Screener: 15:45 WIB setiap hari bursa ───────────────────────
+    scheduler.add_job(
+        job_bsjp_scan,
+        CronTrigger(day_of_week="mon-fri", hour=15, minute=45, timezone="Asia/Jakarta"),
+        id="bsjp_scan",
+        name="BSJP Screener 15:45 WIB",
+        replace_existing=True,
+    )
+
+    # ── BSJP Rekap: 09:30 WIB setiap hari bursa ─────────────────────────
+    scheduler.add_job(
+        job_bsjp_rekap,
+        CronTrigger(day_of_week="mon-fri", hour=9, minute=30, timezone="Asia/Jakarta"),
+        id="bsjp_rekap",
+        name="BSJP Rekap Pagi 09:30 WIB",
+        replace_existing=True,
+    )
+
     logger.info("Scheduler configured with all jobs")
     return scheduler
 
@@ -335,10 +353,10 @@ async def job_intraday_scan(interval_override: str | None = None, pure_technical
             bullish_signals = [s for s in signals if s.signal in BULLISH_SIGNALS] if signals else []
 
             if pure_technical:
-                scan_name = "NOON INTRADAY SCAN (60m — PURE TEKNIKAL)"
+                scan_name = f"NOON INTRADAY SCAN ({interval_used} — PURE TEKNIKAL)"
                 scan_emoji = "☀️"
             else:
-                scan_name = "MORNING PRE-MARKET SCAN" if interval_used == "1d" else "NOON INTRADAY SCAN"
+                scan_name = "MORNING PRE-MARKET SCAN" if interval_used == "1d" else f"NOON INTRADAY SCAN ({interval_used})"
                 scan_emoji = "🌅"
 
             if not bullish_signals:
@@ -807,4 +825,236 @@ async def job_sps_recap():
 
     except Exception as e:
         logger.error(f"[Scheduler] Error running SPS recap job: {e}", exc_info=True)
+
+
+
+# ==================================================================
+
+# ================================================================== #
+#  Job: BSJP Scan — Beli Sore Jual Profit (15:45 WIB)
+# ================================================================== #
+
+async def job_bsjp_scan():
+    """
+    BSJP Screener: jalankan pukul 15:45 WIB setiap hari bursa.
+    Ambil universe, scoring tiap saham, kirim sinyal ke Telegram.
+    """
+    from datetime import date as date_cls
+    logger.info(f"[BSJP] Starting BSJP scan at {datetime.now()}")
+    try:
+        from services.bsjp_engine import run_bsjp_screener
+        from services.bsjp_db import save_bsjp_signals, migrate_bsjp_table
+        from services.stock_universe_service import get_stock_universe
+        from services.idx_full_universe_service import get_full_idx_universe, is_fca_stock
+        from app.config import get_settings
+        import os
+
+        settings_obj = get_settings()
+        bsjp_token = os.getenv("BSJP_BOT_TOKEN", getattr(settings_obj, "BSJP_BOT_TOKEN", "9261989934:AAFO3q5Bs32pp4ElVyxYf-VufWaYj66rwPo"))
+        bsjp_chat = os.getenv("BSJP_CHAT_ID", getattr(settings_obj, "BSJP_CHAT_ID", "-1004302595573"))
+        bsjp_thread = int(os.getenv("BSJP_THREAD_ID", str(getattr(settings_obj, "BSJP_THREAD_ID", 107) or 107)))
+
+        # Migrate tabel jika belum ada
+        await asyncio.to_thread(migrate_bsjp_table)
+
+        # Ambil universe: gunakan full universe jika tersedia, fallback default
+        try:
+            universe_raw = await asyncio.to_thread(get_full_idx_universe)
+            universe = [t for t in universe_raw if not is_fca_stock(t)]
+        except Exception:
+            universe_data = get_stock_universe()
+            universe = [s["ticker"] for s in universe_data]
+
+        logger.info(f"[BSJP] Universe size: {len(universe)}")
+
+        # Jalankan screener
+        signals = await asyncio.to_thread(run_bsjp_screener, universe)
+        logger.info(f"[BSJP] Candidates found: {len(signals)}")
+
+        # Simpan ke DB
+        await asyncio.to_thread(save_bsjp_signals, signals)
+
+        # Format pesan Telegram
+        if signals:
+            ticker_lines = "
+".join(s["ticker"] for s in signals)
+        else:
+            ticker_lines = "(tidak ada kandidat hari ini)"
+
+        msg = (
+            "BSJP SABER TRADER
+"
+            "Beli di lelang pre-closing · JUAL BESOK PAGI sebelum jam 9.30
+
+"
+            f"{ticker_lines}
+
+"
+            "⚠️ Ini pemantauan pola, BUKAN rekomendasi beli/jual. "
+            "Keputusan, ukuran posisi, dan risiko sepenuhnya di tangan Anda.
+"
+            "🤖 Powered by Bot Saber Trader— BSJP"
+        )
+
+        from telegram import Bot
+        bot = Bot(token=bsjp_token)
+        await send_telegram_with_retry(
+            bot, bsjp_chat, text=msg, message_thread_id=bsjp_thread
+        )
+        logger.info(f"[BSJP] Sent {len(signals)} candidates to Telegram.")
+
+    except Exception as e:
+        logger.error(f"[BSJP] job_bsjp_scan failed: {e}", exc_info=True)
+
+
+# ================================================================== #
+#  Job: BSJP Rekap Pagi (09:30 WIB)
+# ================================================================== #
+
+async def job_bsjp_rekap():
+    """
+    BSJP Rekap: pukul 09:30 WIB, hitung outcome sinyal BSJP kemarin.
+    Profit = high sebelum 09:30 hari ini > close sinyal kemarin.
+    """
+    from datetime import date as date_cls, timedelta
+    logger.info(f"[BSJP] Starting BSJP rekap at {datetime.now()}")
+    try:
+        from services.bsjp_db import get_pending_bsjp_signals, update_bsjp_outcome
+        from app.config import get_settings
+        import yfinance as yf
+        import pytz
+        import os
+
+        settings_obj = get_settings()
+        bsjp_token = os.getenv("BSJP_BOT_TOKEN", getattr(settings_obj, "BSJP_BOT_TOKEN", "9261989934:AAFO3q5Bs32pp4ElVyxYf-VufWaYj66rwPo"))
+        bsjp_chat = os.getenv("BSJP_CHAT_ID", getattr(settings_obj, "BSJP_CHAT_ID", "-1004302595573"))
+        bsjp_thread = int(os.getenv("BSJP_THREAD_ID", str(getattr(settings_obj, "BSJP_THREAD_ID", 107) or 107)))
+
+        wib = pytz.timezone("Asia/Jakarta")
+        today_wib = datetime.now(wib).date()
+        yesterday_str = (today_wib - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        # Dapatkan sinyal kemarin yang masih pending
+        pending = await asyncio.to_thread(get_pending_bsjp_signals, yesterday_str)
+        if not pending:
+            logger.info(f"[BSJP Rekap] Tidak ada pending signals untuk {yesterday_str}")
+            return
+
+        logger.info(f"[BSJP Rekap] Processing {len(pending)} pending signals from {yesterday_str}")
+
+        recap_lines = []
+        profit_count = 0
+        lose_count = 0
+
+        for sig in pending:
+            ticker = sig["ticker"]
+            close_signal = sig.get("close_price") or 0
+            yf_ticker = ticker if ticker.endswith(".JK") else ticker + ".JK"
+
+            try:
+                # Ambil data 5M hari ini untuk mendapat high dan low sebelum 09:30
+                raw = await asyncio.to_thread(
+                    lambda t=yf_ticker: yf.download(
+                        t, period="1d", interval="5m",
+                        auto_adjust=True, progress=False, threads=False
+                    )
+                )
+                if raw is None or raw.empty:
+                    logger.warning(f"[BSJP Rekap] No data for {ticker}")
+                    continue
+
+                if isinstance(raw.columns, pd.MultiIndex):
+                    raw.columns = raw.columns.get_level_values(0)
+                raw.columns = [c.lower() for c in raw.columns]
+
+                if raw.index.tzinfo is None:
+                    raw.index = raw.index.tz_localize("UTC")
+                raw.index = raw.index.tz_convert(wib)
+
+                # Filter candle sebelum 09:30 WIB hari ini
+                cutoff = datetime.now(wib).replace(hour=9, minute=30, second=0, microsecond=0)
+                df_before_930 = raw[raw.index < cutoff]
+
+                if df_before_930.empty:
+                    df_before_930 = raw.head(1)
+
+                high_before_930 = float(df_before_930["high"].max())
+                low_before_930 = float(df_before_930["low"].min())
+                open_today = float(raw["open"].iloc[0]) if not raw.empty else 0.0
+
+                # Hitung outcome
+                if close_signal > 0:
+                    is_profit = high_before_930 > close_signal
+                    if is_profit:
+                        pct_chg = (high_before_930 - close_signal) / close_signal
+                        price_val = high_before_930
+                    else:
+                        pct_chg = (low_before_930 - close_signal) / close_signal
+                        price_val = low_before_930
+                else:
+                    pct_chg = 0.0
+                    is_profit = False
+                    price_val = high_before_930
+
+                outcome = "profit" if is_profit else "lose"
+                await asyncio.to_thread(
+                    update_bsjp_outcome,
+                    ticker, yesterday_str, open_today, high_before_930,
+                    pct_chg, outcome
+                )
+
+                emoji = "🟢" if is_profit else "🛑"
+                pct_str = f"+{pct_chg:.1%}" if pct_chg >= 0 else f"{pct_chg:.1%}"
+                price_display = int(price_val) if price_val >= 100 else round(price_val, 2)
+                outcome_label = "Profit" if is_profit else "Lose"
+                recap_lines.append(
+                    f"{emoji} {ticker} | {price_display} | {pct_str} | {outcome_label}"
+                )
+                if is_profit:
+                    profit_count += 1
+                else:
+                    lose_count += 1
+
+            except Exception as e:
+                logger.error(f"[BSJP Rekap] Error processing {ticker}: {e}")
+                continue
+
+        total = profit_count + lose_count
+        wr = int(profit_count / total * 100) if total > 0 else 0
+
+        if recap_lines:
+            detail = "
+".join(recap_lines)
+            msg = (
+                f"Rekap BSJP kemaren
+"
+                f"Signal:{total}  Profit:{profit_count}  Lose:{lose_count} WR:{wr}%
+
+"
+                "nama saham | high/low | persen | profit/lose
+"
+                f"{detail}
+
+"
+                "🤖 Bot Saber Trader — BSJP"
+            )
+        else:
+            msg = (
+                f"Rekap BSJP kemaren
+"
+                f"Tidak ada data rekap untuk {yesterday_str}.
+
+"
+                "🤖 Bot Saber Trader — BSJP"
+            )
+
+        from telegram import Bot
+        bot = Bot(token=bsjp_token)
+        await send_telegram_with_retry(
+            bot, bsjp_chat, text=msg, message_thread_id=bsjp_thread
+        )
+        logger.info(f"[BSJP Rekap] Sent recap: {profit_count}P / {lose_count}L / WR {wr}%")
+
+    except Exception as e:
+        logger.error(f"[BSJP] job_bsjp_rekap failed: {e}", exc_info=True)
 

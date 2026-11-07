@@ -67,7 +67,15 @@ def format_signal_message(signal_data: dict) -> str:
 
     # RSI (14)
     rsi = float(tech.get("rsi") or 50.0)
-    if rsi >= 70:
+    if tech.get("rsi_consistent_above_80"):
+        rsi_status = "🟢 Super Momentum (>80 x4)"
+    elif tech.get("rsi_reversal_down_from_80"):
+        rsi_status = "🔴 Reversal Down (<80)"
+    elif tech.get("rsi_consistent_below_30"):
+        rsi_status = "🔴 Falling Knife (<30 x4)"
+    elif tech.get("rsi_reversal_up_from_30"):
+        rsi_status = "🟢 Bullish Bounce (>30)"
+    elif rsi >= 70:
         rsi_status = "🔴 Overbought"
     elif rsi >= 60:
         rsi_status = "🟡 Overbought"
