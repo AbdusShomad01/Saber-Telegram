@@ -40,8 +40,37 @@ logger = logging.getLogger(__name__)
 
 
 # ================================================================== #
-#  Telegram Send Helper — with retry + exponential backoff
+#  Telegram Send Helper — with requests & retry
 # ================================================================== #
+
+def send_telegram_direct_requests(token, chat_id, text=None, photo=None, caption=None,
+                                   parse_mode="HTML", message_thread_id=None, timeout=25):
+    """Kirim pesan Telegram via library requests yang stabil menangani TLS renegotiation."""
+    import requests
+    try:
+        if photo:
+            url = f"https://api.telegram.org/bot{token}/sendPhoto"
+            data = {"chat_id": chat_id, "caption": caption or "", "parse_mode": parse_mode}
+            if message_thread_id:
+                data["message_thread_id"] = int(message_thread_id)
+            if isinstance(photo, str) and os.path.exists(photo):
+                with open(photo, "rb") as f:
+                    r = requests.post(url, data=data, files={"photo": f}, timeout=timeout)
+            else:
+                data["photo"] = photo
+                r = requests.post(url, data=data, timeout=timeout)
+            return r.status_code == 200
+        else:
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+            if message_thread_id:
+                payload["message_thread_id"] = int(message_thread_id)
+            r = requests.post(url, json=payload, timeout=timeout)
+            return r.status_code == 200
+    except Exception as ex:
+        logger.warning(f"[Telegram Direct Requests] error: {ex}")
+        return False
+
 
 async def send_telegram_with_retry(bot, chat_id, text=None, photo=None, caption=None,
                                     parse_mode="HTML", message_thread_id=None, max_retries=3):
@@ -49,8 +78,28 @@ async def send_telegram_with_retry(bot, chat_id, text=None, photo=None, caption=
     Send a Telegram message or photo with retry logic and exponential backoff.
     Returns True if sent successfully, False otherwise.
     """
+    token = getattr(bot, "token", None) if hasattr(bot, "token") else (bot if isinstance(bot, str) else None)
     for attempt in range(max_retries):
         try:
+            # 1. Coba via direct requests (paling stabil terhadap TLS renegotiation)
+            if token:
+                success = await asyncio.to_thread(
+                    send_telegram_direct_requests,
+                    token=token,
+                    chat_id=chat_id,
+                    text=text,
+                    photo=photo,
+                    caption=caption,
+                    parse_mode=parse_mode,
+                    message_thread_id=message_thread_id,
+                    timeout=25,
+                )
+                if success:
+                    return True
+                else:
+                    logger.warning(f"Telegram requests attempt {attempt + 1}/{max_retries} failed, trying bot client...")
+
+            # 2. Fallback ke async bot client
             if photo:
                 await bot.send_photo(
                     chat_id=chat_id,
@@ -76,51 +125,20 @@ async def send_telegram_with_retry(bot, chat_id, text=None, photo=None, caption=
         except Exception as e:
             error_str = str(e).lower()
             if "too many requests" in error_str or "retry after" in error_str or "429" in error_str:
-                # Rate limit — wait longer
-                wait = (2 ** attempt) * 5  # 5s, 10s, 20s
+                wait = (2 ** attempt) * 5
                 logger.warning(f"Telegram rate limit hit (attempt {attempt + 1}/{max_retries}). Waiting {wait}s...")
                 await asyncio.sleep(wait)
             elif "message is too long" in error_str:
-                # Message too long — truncate and retry once
                 if text and len(text) > 4096:
                     text = text[:4090] + "\n..."
-                    logger.warning("Message truncated to fit Telegram limit.")
                     continue
-                else:
-                    logger.error(f"Telegram send failed (message too long): {e}")
-                    return False
+                return False
             elif attempt < max_retries - 1:
-                wait = (2 ** attempt) * 3  # 3s, 6s
+                wait = (2 ** attempt) * 2
                 logger.warning(f"Telegram send failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait}s...")
                 await asyncio.sleep(wait)
             else:
-                logger.error(f"Telegram send permanently failed after {max_retries} attempts: {e}. Trying direct HTTP fallback...")
-                # Direct HTTP fallback via urllib
-                try:
-                    import urllib.request
-                    token = getattr(bot, "token", None)
-                    if token and text:
-                        def _direct_send():
-                            url = f"https://api.telegram.org/bot{token}/sendMessage"
-                            payload = {
-                                "chat_id": chat_id,
-                                "text": text,
-                                "parse_mode": parse_mode,
-                            }
-                            if message_thread_id:
-                                payload["message_thread_id"] = int(message_thread_id)
-                            req_data = json.dumps(payload).encode("utf-8")
-                            req = urllib.request.Request(
-                                url, data=req_data, headers={"Content-Type": "application/json"}
-                            )
-                            with urllib.request.urlopen(req, timeout=30) as resp:
-                                return resp.status == 200
-                        success = await asyncio.to_thread(_direct_send)
-                        if success:
-                            logger.info("Direct HTTP fallback sent successfully.")
-                            return True
-                except Exception as ex_direct:
-                    logger.error(f"Direct HTTP fallback also failed: {ex_direct}")
+                logger.error(f"Telegram send permanently failed after {max_retries} attempts: {e}")
                 return False
     return False
 
