@@ -24,6 +24,7 @@ Syarat wajib: harga di atas VWAP, EMA 9 di atas EMA 20, dan CLV minimal 0,75.
 """
 
 import logging
+import time
 from datetime import date, datetime
 from typing import Optional, List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -31,6 +32,15 @@ import pandas as pd
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+# Monkeypatch yfinance User-Agent agar tidak terkena blokir / HTTP 429 Rate Limit
+try:
+    import yfinance.data as yfd
+    yfd.YfData.user_agent_headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+except Exception as e:
+    logger.warning(f"Failed to monkeypatch yfinance User-Agent: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -289,34 +299,39 @@ def compute_bsjp_score(
 
 def run_bsjp_screener(universe: List[str]) -> List[Dict[str, Any]]:
     """
-    Jalankan BSJP screener untuk seluruh universe secara paralel (ThreadPoolExecutor).
+    Jalankan BSJP screener untuk seluruh universe dengan safe rate-limiting.
+    Menggunakan 3 worker terkendali + micro-delay agar aman dari blokir Yahoo Finance.
     Kembalikan daftar saham yang lolos (skor ≥ 70), diurutkan dari skor tertinggi.
     """
     ihsg_ret = _ihsg_return_today()
     results = []
     total = len(universe)
-    print(f"🔍 Mulai scanning {total} saham BSJP secara paralel...")
+    print(f"🔍 Mulai scanning {total} saham BSJP (Safe Rate Limit mode)...")
 
     def _eval(ticker: str):
         try:
+            # Micro-delay 0.1s untuk mencegah burst IP rate limit
+            time.sleep(0.1)
             return compute_bsjp_score(ticker, ihsg_ret=ihsg_ret)
         except Exception as e:
             logger.debug(f"[BSJP] Error on {ticker}: {e}")
             return None
 
     completed = 0
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    # max_workers=3 aman dari rate limit Yahoo Finance
+    with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {executor.submit(_eval, t): t for t in universe}
         for future in as_completed(futures):
             completed += 1
+            ticker_name = futures[future]
             res = future.result()
             if res and res.get("score", 0) >= 70:
                 results.append(res)
-                print(f"  ⭐ {res['ticker']} LOLOS BSJP (Skor: {res['score']})")
+                print(f"  ⭐ [{completed}/{total}] {res['ticker']} LOLOS BSJP (Skor: {res['score']})")
                 logger.info(f"[BSJP] {res['ticker']} LOLOS score={res['score']}")
-            if completed % 20 == 0 or completed == total:
-                print(f"  ⏳ Progress: {completed}/{total} saham selesai diperiksa...")
+            elif completed % 10 == 0 or completed == total:
+                print(f"  ⏳ [{completed}/{total}] Memeriksa saham... (Aman & stabil)")
 
     results.sort(key=lambda x: x["score"], reverse=True)
-    print(f"✅ Selesai! Ditemukan {len(results)} kandidat BSJP.")
+    print(f"\n✅ Selesai! Ditemukan {len(results)} kandidat BSJP.")
     return results
