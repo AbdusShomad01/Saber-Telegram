@@ -831,6 +831,8 @@ async def job_sps_recap():
 # ==================================================================
 
 # ================================================================== #
+
+# ================================================================== #
 #  Job: BSJP Scan — Beli Sore Jual Profit (15:45 WIB)
 # ================================================================== #
 
@@ -839,7 +841,6 @@ async def job_bsjp_scan():
     BSJP Screener: jalankan pukul 15:45 WIB setiap hari bursa.
     Ambil universe, scoring tiap saham, kirim sinyal ke Telegram.
     """
-    from datetime import date as date_cls
     logger.info(f"[BSJP] Starting BSJP scan at {datetime.now()}")
     try:
         from services.bsjp_engine import run_bsjp_screener
@@ -876,25 +877,20 @@ async def job_bsjp_scan():
 
         # Format pesan Telegram
         if signals:
-            ticker_lines = "
-".join(s["ticker"] for s in signals)
+            ticker_lines = "\n".join(s["ticker"] for s in signals)
         else:
             ticker_lines = "(tidak ada kandidat hari ini)"
 
-        msg = (
-            "BSJP SABER TRADER
-"
-            "Beli di lelang pre-closing · JUAL BESOK PAGI sebelum jam 9.30
-
-"
-            f"{ticker_lines}
-
-"
-            "⚠️ Ini pemantauan pola, BUKAN rekomendasi beli/jual. "
-            "Keputusan, ukuran posisi, dan risiko sepenuhnya di tangan Anda.
-"
+        msg_lines = [
+            "BSJP SABER TRADER",
+            "Beli di lelang pre-closing · JUAL BESOK PAGI sebelum jam 9.30",
+            "",
+            ticker_lines,
+            "",
+            "⚠️ Ini pemantauan pola, BUKAN rekomendasi beli/jual. Keputusan, ukuran posisi, dan risiko sepenuhnya di tangan Anda.",
             "🤖 Powered by Bot Saber Trader— BSJP"
-        )
+        ]
+        msg = "\n".join(msg_lines)
 
         from telegram import Bot
         bot = Bot(token=bsjp_token)
@@ -916,7 +912,7 @@ async def job_bsjp_rekap():
     BSJP Rekap: pukul 09:30 WIB, hitung outcome sinyal BSJP kemarin.
     Profit = high sebelum 09:30 hari ini > close sinyal kemarin.
     """
-    from datetime import date as date_cls, timedelta
+    from datetime import timedelta
     logger.info(f"[BSJP] Starting BSJP rekap at {datetime.now()}")
     try:
         from services.bsjp_db import get_pending_bsjp_signals, update_bsjp_outcome
@@ -1023,30 +1019,25 @@ async def job_bsjp_rekap():
         wr = int(profit_count / total * 100) if total > 0 else 0
 
         if recap_lines:
-            detail = "
-".join(recap_lines)
-            msg = (
-                f"Rekap BSJP kemaren
-"
-                f"Signal:{total}  Profit:{profit_count}  Lose:{lose_count} WR:{wr}%
-
-"
-                "nama saham | high/low | persen | profit/lose
-"
-                f"{detail}
-
-"
+            detail = "\n".join(recap_lines)
+            msg_lines = [
+                "Rekap BSJP kemaren",
+                f"Signal:{total}  Profit:{profit_count}  Lose:{lose_count} WR:{wr}%",
+                "",
+                "nama saham | high/low | persen | profit/lose",
+                detail,
+                "",
                 "🤖 Bot Saber Trader — BSJP"
-            )
+            ]
+            msg = "\n".join(msg_lines)
         else:
-            msg = (
-                f"Rekap BSJP kemaren
-"
-                f"Tidak ada data rekap untuk {yesterday_str}.
-
-"
+            msg_lines = [
+                "Rekap BSJP kemaren",
+                f"Tidak ada data rekap untuk {yesterday_str}.",
+                "",
                 "🤖 Bot Saber Trader — BSJP"
-            )
+            ]
+            msg = "\n".join(msg_lines)
 
         from telegram import Bot
         bot = Bot(token=bsjp_token)
