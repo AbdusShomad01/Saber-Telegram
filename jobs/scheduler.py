@@ -160,32 +160,22 @@ def create_scheduler() -> AsyncIOScheduler:
     except Exception as e:
         logger.warning(f"[Scheduler] Outcome migration warning: {e}")
 
-    # ── Screener Pagi: Morning Pre-Market scan at 00:01 WIB (Senin-Jumat) ────
+    # ── Screener Pagi: Morning Pre-Market scan at 06:00 WIB (Senin-Jumat) ────
     scheduler.add_job(
         job_intraday_scan,
-        CronTrigger(day_of_week="mon-fri", hour="0", minute="1", timezone="Asia/Jakarta"),
+        CronTrigger(day_of_week="mon-fri", hour=6, minute=0, timezone="Asia/Jakarta"),
         id="morning_scan",
-        name="Morning Pre-Market Scan",
+        name="Morning Pre-Market Scan 06:00 WIB",
         replace_existing=True,
         kwargs={"interval_override": "1d"}
     )
 
-    # ── Screener Siang: Noon Intraday Scan (15m - Pure Teknikal) ─────────────
-    # Senin - Kamis: 12:05 WIB (setelah Sesi 1 tutup jam 12:00)
+    # ── Screener Siang: Noon Intraday Scan (15m - Pure Teknikal) at 12:30 WIB ──
     scheduler.add_job(
         job_intraday_scan,
-        CronTrigger(day_of_week="mon-thu", hour=12, minute=5, timezone="Asia/Jakarta"),
-        id="noon_scan_mon_thu",
-        name="Noon Intraday Scan 15m (Mon-Thu 12:05 WIB)",
-        replace_existing=True,
-        kwargs={"interval_override": "15m", "pure_technical": True}
-    )
-    # Jumat: 11:35 WIB (setelah Sesi 1 Jumat tutup jam 11:30)
-    scheduler.add_job(
-        job_intraday_scan,
-        CronTrigger(day_of_week="fri", hour=11, minute=35, timezone="Asia/Jakarta"),
-        id="noon_scan_fri",
-        name="Noon Intraday Scan 15m (Fri 11:35 WIB)",
+        CronTrigger(day_of_week="mon-fri", hour=12, minute=30, timezone="Asia/Jakarta"),
+        id="noon_scan",
+        name="Noon Intraday Scan 15m (12:30 WIB)",
         replace_existing=True,
         kwargs={"interval_override": "15m", "pure_technical": True}
     )
@@ -217,14 +207,7 @@ def create_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
     )
 
-    # Daily SPS signal recap to Google Sheets at 17:02 WIB (Senin-Jumat)
-    scheduler.add_job(
-        job_sps_recap,
-        CronTrigger(day_of_week="mon-fri", hour=17, minute=2, timezone="Asia/Jakarta"),
-        id="sps_recap",
-        name="Daily SPS Signal Recap to Google Sheets",
-        replace_existing=True,
-    )
+    # Catatan: Daily SPS recap ke Google Sheets dinonaktifkan sesuai permintaan user
 
     # Expire old pending signals every night at 20:00 WIB
     scheduler.add_job(
