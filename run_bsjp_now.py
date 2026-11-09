@@ -28,6 +28,12 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 from dotenv import load_dotenv
 load_dotenv()
 
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-7s | %(name)s - %(message)s"
+)
+
 from jobs.scheduler import job_bsjp_scan
 
 if __name__ == "__main__":

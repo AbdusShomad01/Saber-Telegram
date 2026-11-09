@@ -59,7 +59,7 @@ def _fetch_intraday(ticker: str, interval: str, target_date: Optional[str] = Non
         yf_ticker = ticker if ticker.endswith(".JK") else ticker + ".JK"
         raw = yf.download(
             yf_ticker,
-            period="5d",
+            period="60d",
             interval=interval,
             auto_adjust=True,
             progress=False,
@@ -121,7 +121,7 @@ def _ihsg_return_today() -> Optional[float]:
     """Return IHSG hari ini (pct change dari close kemarin ke close/terakhir hari ini)."""
     try:
         import yfinance as yf
-        ihsg = yf.download("^JKSE", period="5d", interval="1d",
+        ihsg = yf.download("^JKSE", period="60d", interval="1d",
                            auto_adjust=True, progress=False, threads=False)
         if ihsg is None or len(ihsg) < 2:
             return None

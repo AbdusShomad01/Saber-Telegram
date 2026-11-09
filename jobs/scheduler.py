@@ -47,6 +47,9 @@ def send_telegram_direct_requests(token, chat_id, text=None, photo=None, caption
                                    parse_mode="HTML", message_thread_id=None, timeout=25):
     """Kirim pesan Telegram via library requests yang stabil menangani TLS renegotiation."""
     import requests
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     try:
         if photo:
             url = f"https://api.telegram.org/bot{token}/sendPhoto"
@@ -55,20 +58,32 @@ def send_telegram_direct_requests(token, chat_id, text=None, photo=None, caption
                 data["message_thread_id"] = int(message_thread_id)
             if isinstance(photo, str) and os.path.exists(photo):
                 with open(photo, "rb") as f:
-                    r = requests.post(url, data=data, files={"photo": f}, timeout=timeout)
+                    r = requests.post(url, data=data, files={"photo": f}, headers=headers, timeout=timeout)
             else:
                 data["photo"] = photo
-                r = requests.post(url, data=data, timeout=timeout)
+                r = requests.post(url, data=data, headers=headers, timeout=timeout)
+            if r.status_code != 200:
+                logger.error(f"[Telegram Direct Requests] Photo Failed ({r.status_code}): {r.text}")
+                print(f"❌ Telegram Direct Requests Photo Error ({r.status_code}): {r.text}")
             return r.status_code == 200
         else:
             url = f"https://api.telegram.org/bot{token}/sendMessage"
             payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
             if message_thread_id:
                 payload["message_thread_id"] = int(message_thread_id)
-            r = requests.post(url, json=payload, timeout=timeout)
+            r = requests.post(url, json=payload, headers=headers, timeout=timeout)
+            if r.status_code != 200:
+                # Coba kirim ulang tanpa parse_mode jika error karena formatting entities
+                if "can't parse entities" in r.text or "parse entities" in r.text.lower():
+                    payload.pop("parse_mode", None)
+                    r = requests.post(url, json=payload, headers=headers, timeout=timeout)
+                if r.status_code != 200:
+                    logger.error(f"[Telegram Direct Requests] Failed ({r.status_code}): {r.text}")
+                    print(f"❌ Telegram Error ({r.status_code}): {r.text}")
             return r.status_code == 200
     except Exception as ex:
         logger.warning(f"[Telegram Direct Requests] error: {ex}")
+        print(f"❌ Telegram Direct Requests Exception: {ex}")
         return False
 
 
@@ -979,10 +994,15 @@ async def job_bsjp_scan():
         from telegram.request import HTTPXRequest
         req_client = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0, write_timeout=30.0)
         bot = Bot(token=bsjp_token, request=req_client)
-        await send_telegram_with_retry(
+        print(f"📤 Mengirim sinyal BSJP ({len(signals)} kandidat) ke Telegram Room {bsjp_thread}...")
+        sent = await send_telegram_with_retry(
             bot, bsjp_chat, text=msg, message_thread_id=bsjp_thread
         )
-        logger.info(f"[BSJP] Sent {len(signals)} candidates to Telegram.")
+        if sent:
+            print(f"✅ Sinyal BSJP berhasil terkirim ke Telegram Room {bsjp_thread}!")
+            logger.info(f"[BSJP] Sent {len(signals)} candidates to Telegram.")
+        else:
+            print(f"❌ Sinyal BSJP gagal terkirim ke Telegram Room {bsjp_thread}.")
 
     except Exception as e:
         logger.error(f"[BSJP] job_bsjp_scan failed: {e}", exc_info=True)
@@ -1128,10 +1148,15 @@ async def job_bsjp_rekap():
         from telegram.request import HTTPXRequest
         req_client = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0, write_timeout=30.0)
         bot = Bot(token=bsjp_token, request=req_client)
-        await send_telegram_with_retry(
+        print(f"📤 Mengirim Rekap BSJP ke Telegram Room {bsjp_thread}...")
+        sent = await send_telegram_with_retry(
             bot, bsjp_chat, text=msg, message_thread_id=bsjp_thread
         )
-        logger.info(f"[BSJP Rekap] Sent recap: {profit_count}P / {lose_count}L / WR {wr}%")
+        if sent:
+            print(f"✅ Rekap BSJP berhasil terkirim ke Telegram Room {bsjp_thread}!")
+            logger.info(f"[BSJP Rekap] Sent recap: {profit_count}P / {lose_count}L / WR {wr}%")
+        else:
+            print(f"❌ Rekap BSJP gagal terkirim ke Telegram Room {bsjp_thread}.")
 
     except Exception as e:
         logger.error(f"[BSJP] job_bsjp_rekap failed: {e}", exc_info=True)
