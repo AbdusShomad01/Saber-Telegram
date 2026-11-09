@@ -118,16 +118,16 @@ class DataProviderService:
             # Intraday limits: 1m max 7d, 5m/15m/30m/60m/1h max 60d
             if interval in ["1m", "5m", "15m", "30m", "60m", "1h"]:
                 if interval == "1m":
-                    period = "7d"
+                    period = "5d"
                     with _YFINANCE_DOWNLOAD_LOCK:
                         data = yf.download(yf_ticker, period=period, interval=interval, progress=False)
                 elif interval in ["5m", "15m", "30m", "60m", "1h"]:
-                    period = "60d"
+                    period = "1mo"
                     with _YFINANCE_DOWNLOAD_LOCK:
                         data = yf.download(yf_ticker, period=period, interval=interval, progress=False)
                 else:
                     with _YFINANCE_DOWNLOAD_LOCK:
-                        data = yf.download(yf_ticker, period="60d", interval=interval, progress=False)
+                        data = yf.download(yf_ticker, period="1mo", interval=interval, progress=False)
             else:
                 with _YFINANCE_DOWNLOAD_LOCK:
                     data = yf.download(yf_ticker, start=str(start), end=str(end), interval=interval, progress=False)
