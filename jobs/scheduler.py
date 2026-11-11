@@ -1037,18 +1037,165 @@ async def job_bsjp_scan():
 #  Job: BSJP Rekap Pagi (09:30 WIB)
 # ================================================================== #
 
+def evaluate_bsjp_rekap_item(raw, close_signal: float, today_wib, cutoff_dt, wib) -> dict | None:
+    """
+    Hitung outcome rekap BSJP dari candle 5m hari ini sebelum pukul 09:30 WIB.
+    Mengembalikan dict outcome & line display, atau None jika belum ada candle hari ini.
+    """
+    import pandas as pd
+
+    if raw is None or raw.empty:
+        return None
+
+    df = raw.copy()
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    df.columns = [str(c).lower() for c in df.columns]
+
+    if df.index.tzinfo is None:
+        df.index = df.index.tz_localize("UTC")
+    df.index = df.index.tz_convert(wib)
+
+    raw_today = df[df.index.date == today_wib]
+    if raw_today.empty:
+        return None
+
+    df_before_930 = raw_today[raw_today.index < cutoff_dt]
+    if df_before_930.empty:
+        df_before_930 = raw_today.head(1)
+
+    high_before_930 = float(df_before_930["high"].max())
+    low_before_930 = float(df_before_930["low"].min())
+    open_today = float(raw_today["open"].iloc[0])
+
+    if close_signal > 0:
+        is_profit = high_before_930 > close_signal
+        if is_profit:
+            pct_chg = (high_before_930 - close_signal) / close_signal
+            price_val = high_before_930
+        else:
+            pct_chg = (low_before_930 - close_signal) / close_signal
+            price_val = low_before_930
+    else:
+        pct_chg = 0.0
+        is_profit = False
+        price_val = high_before_930
+
+    return {
+        "is_profit": is_profit,
+        "outcome": "profit" if is_profit else "lose",
+        "pct_chg": pct_chg,
+        "price_val": price_val,
+        "open_today": open_today,
+        "high_before_930": high_before_930,
+    }
+
+
+def run_bsjp_rekap_sync(now_wib=None, fetch_bars_fn=None) -> dict | None:
+    """
+    Proses rekap BSJP pending terakhir sebelum hari ini dan update tabel bsjp_signals.
+    Mengembalikan dict hasil + teks pesan Telegram, atau None jika tidak ada pending signals.
+    """
+    from services.bsjp_db import get_latest_pending_bsjp_signals, update_bsjp_outcome
+    import yfinance as yf
+    import pytz
+
+    wib = pytz.timezone("Asia/Jakarta")
+    now_dt = now_wib or datetime.now(wib)
+    today_wib = now_dt.date()
+    today_wib_str = today_wib.strftime("%Y-%m-%d")
+    cutoff = now_dt.replace(hour=9, minute=30, second=0, microsecond=0)
+
+    target_date, pending = get_latest_pending_bsjp_signals(today_wib_str)
+    if not pending or not target_date:
+        logger.info(f"[BSJP Rekap] Tidak ada pending signals sebelum {today_wib_str}")
+        print(f"ℹ️ Tidak ada pending signals BSJP sebelum {today_wib_str}.")
+        return None
+
+    logger.info(f"[BSJP Rekap] Processing {len(pending)} pending signals from {target_date}")
+    print(f"📊 Memproses {len(pending)} sinyal BSJP pending dari tanggal {target_date}...")
+
+    def _default_fetch(yf_ticker: str):
+        return yf.Ticker(yf_ticker).history(period="1d", interval="5m", auto_adjust=True, timeout=15)
+
+    fetcher = fetch_bars_fn or _default_fetch
+    recap_lines = []
+    profit_count = 0
+    lose_count = 0
+
+    for sig in pending:
+        ticker = sig["ticker"]
+        close_signal = sig.get("close_price") or 0
+        yf_ticker = ticker if ticker.endswith(".JK") else ticker + ".JK"
+
+        try:
+            raw = fetcher(yf_ticker)
+            item = evaluate_bsjp_rekap_item(raw, close_signal, today_wib, cutoff, wib)
+            if item is None:
+                logger.warning(f"[BSJP Rekap] Belum ada candle hari ini ({today_wib_str}) untuk {ticker}")
+                continue
+
+            update_bsjp_outcome(
+                ticker, target_date, item["open_today"], item["high_before_930"],
+                item["pct_chg"], item["outcome"]
+            )
+
+            emoji = "🟢" if item["is_profit"] else "🛑"
+            pct_chg = item["pct_chg"]
+            pct_str = f"+{pct_chg:.1%}" if pct_chg >= 0 else f"{pct_chg:.1%}"
+            price_val = item["price_val"]
+            price_display = int(price_val) if price_val >= 100 else round(price_val, 2)
+            outcome_label = "Profit" if item["is_profit"] else "Lose"
+            recap_lines.append(f"{emoji} {ticker} | {price_display} | {pct_str} | {outcome_label}")
+
+            if item["is_profit"]:
+                profit_count += 1
+            else:
+                lose_count += 1
+        except Exception as e:
+            logger.error(f"[BSJP Rekap] Error processing {ticker}: {e}")
+            continue
+
+    total = profit_count + lose_count
+    wr = int(profit_count / total * 100) if total > 0 else 0
+
+    if recap_lines:
+        detail = "\n".join(recap_lines)
+        msg_lines = [
+            "Rekap BSJP kemaren",
+            f"Signal:{total}  Profit:{profit_count}  Lose:{lose_count} WR:{wr}%",
+            "",
+            "nama saham | high/low | persen | profit/lose",
+            detail,
+            "",
+            "🤖 Bot Saber Trader — BSJP",
+        ]
+    else:
+        msg_lines = [
+            "Rekap BSJP kemaren",
+            f"Tidak ada data rekap untuk {target_date}.",
+            "",
+            "🤖 Bot Saber Trader — BSJP",
+        ]
+
+    return {
+        "target_date": target_date,
+        "profit_count": profit_count,
+        "lose_count": lose_count,
+        "wr": wr,
+        "msg": "\n".join(msg_lines),
+    }
+
+
 async def job_bsjp_rekap():
     """
-    BSJP Rekap: pukul 09:30 WIB, hitung outcome sinyal BSJP kemarin.
-    Profit = high sebelum 09:30 hari ini > close sinyal kemarin.
+    BSJP Rekap: pukul 09:30 WIB, hitung outcome sinyal BSJP pending terakhir sebelum hari ini.
+    Menangani jeda akhir pekan (Jumat -> Senin) & hari libur bursa.
+    Profit = high sebelum 09:30 hari ini > close sinyal tersebut.
     """
-    from datetime import timedelta
     logger.info(f"[BSJP] Starting BSJP rekap at {datetime.now()}")
     try:
-        from services.bsjp_db import get_pending_bsjp_signals, update_bsjp_outcome
         from app.config import get_settings
-        import yfinance as yf
-        import pytz
         import os
 
         settings_obj = get_settings()
@@ -1056,118 +1203,14 @@ async def job_bsjp_rekap():
         bsjp_chat = os.getenv("BSJP_CHAT_ID", getattr(settings_obj, "BSJP_CHAT_ID", "-1004302595573"))
         bsjp_thread = int(os.getenv("BSJP_THREAD_ID", str(getattr(settings_obj, "BSJP_THREAD_ID", 107) or 107)))
 
-        wib = pytz.timezone("Asia/Jakarta")
-        today_wib = datetime.now(wib).date()
-        yesterday_str = (today_wib - timedelta(days=1)).strftime("%Y-%m-%d")
-
-        # Dapatkan sinyal kemarin yang masih pending
-        pending = await asyncio.to_thread(get_pending_bsjp_signals, yesterday_str)
-        if not pending:
-            logger.info(f"[BSJP Rekap] Tidak ada pending signals untuk {yesterday_str}")
+        res = await asyncio.to_thread(run_bsjp_rekap_sync)
+        if not res:
             return
 
-        logger.info(f"[BSJP Rekap] Processing {len(pending)} pending signals from {yesterday_str}")
-
-        recap_lines = []
-        profit_count = 0
-        lose_count = 0
-
-        for sig in pending:
-            ticker = sig["ticker"]
-            close_signal = sig.get("close_price") or 0
-            yf_ticker = ticker if ticker.endswith(".JK") else ticker + ".JK"
-
-            try:
-                # Ambil data 5M hari ini untuk mendapat high dan low sebelum 09:30
-                raw = await asyncio.to_thread(
-                    lambda t=yf_ticker: yf.download(
-                        t, period="1d", interval="5m",
-                        auto_adjust=True, progress=False, threads=False
-                    )
-                )
-                if raw is None or raw.empty:
-                    logger.warning(f"[BSJP Rekap] No data for {ticker}")
-                    continue
-
-                if isinstance(raw.columns, pd.MultiIndex):
-                    raw.columns = raw.columns.get_level_values(0)
-                raw.columns = [c.lower() for c in raw.columns]
-
-                if raw.index.tzinfo is None:
-                    raw.index = raw.index.tz_localize("UTC")
-                raw.index = raw.index.tz_convert(wib)
-
-                # Filter candle sebelum 09:30 WIB hari ini
-                cutoff = datetime.now(wib).replace(hour=9, minute=30, second=0, microsecond=0)
-                df_before_930 = raw[raw.index < cutoff]
-
-                if df_before_930.empty:
-                    df_before_930 = raw.head(1)
-
-                high_before_930 = float(df_before_930["high"].max())
-                low_before_930 = float(df_before_930["low"].min())
-                open_today = float(raw["open"].iloc[0]) if not raw.empty else 0.0
-
-                # Hitung outcome
-                if close_signal > 0:
-                    is_profit = high_before_930 > close_signal
-                    if is_profit:
-                        pct_chg = (high_before_930 - close_signal) / close_signal
-                        price_val = high_before_930
-                    else:
-                        pct_chg = (low_before_930 - close_signal) / close_signal
-                        price_val = low_before_930
-                else:
-                    pct_chg = 0.0
-                    is_profit = False
-                    price_val = high_before_930
-
-                outcome = "profit" if is_profit else "lose"
-                await asyncio.to_thread(
-                    update_bsjp_outcome,
-                    ticker, yesterday_str, open_today, high_before_930,
-                    pct_chg, outcome
-                )
-
-                emoji = "🟢" if is_profit else "🛑"
-                pct_str = f"+{pct_chg:.1%}" if pct_chg >= 0 else f"{pct_chg:.1%}"
-                price_display = int(price_val) if price_val >= 100 else round(price_val, 2)
-                outcome_label = "Profit" if is_profit else "Lose"
-                recap_lines.append(
-                    f"{emoji} {ticker} | {price_display} | {pct_str} | {outcome_label}"
-                )
-                if is_profit:
-                    profit_count += 1
-                else:
-                    lose_count += 1
-
-            except Exception as e:
-                logger.error(f"[BSJP Rekap] Error processing {ticker}: {e}")
-                continue
-
-        total = profit_count + lose_count
-        wr = int(profit_count / total * 100) if total > 0 else 0
-
-        if recap_lines:
-            detail = "\n".join(recap_lines)
-            msg_lines = [
-                "Rekap BSJP kemaren",
-                f"Signal:{total}  Profit:{profit_count}  Lose:{lose_count} WR:{wr}%",
-                "",
-                "nama saham | high/low | persen | profit/lose",
-                detail,
-                "",
-                "🤖 Bot Saber Trader — BSJP"
-            ]
-            msg = "\n".join(msg_lines)
-        else:
-            msg_lines = [
-                "Rekap BSJP kemaren",
-                f"Tidak ada data rekap untuk {yesterday_str}.",
-                "",
-                "🤖 Bot Saber Trader — BSJP"
-            ]
-            msg = "\n".join(msg_lines)
+        msg = res["msg"]
+        profit_count = res["profit_count"]
+        lose_count = res["lose_count"]
+        wr = res["wr"]
 
         from telegram import Bot
         from telegram.request import HTTPXRequest

@@ -2,12 +2,15 @@
 BSJP Database — tabel bsjp_signals untuk menyimpan sinyal dan rekap outcome.
 """
 
-import sqlite3
 import logging
-from datetime import date, datetime
+import sqlite3
+from datetime import datetime
 from typing import Optional
 
+import pytz
+
 logger = logging.getLogger(__name__)
+WIB = pytz.timezone("Asia/Jakarta")
 
 
 def _get_db_path() -> str:
@@ -41,9 +44,9 @@ def migrate_bsjp_table():
 
 
 def save_bsjp_signals(signals: list[dict], signal_date: Optional[str] = None):
-    """Simpan daftar sinyal BSJP ke database. Hindari duplikasi per ticker+tanggal."""
+    """Simpan daftar sinyal BSJP ke database (tanggal WIB). Hindari duplikasi per ticker+tanggal."""
     path = _get_db_path()
-    today_str = signal_date or date.today().strftime("%Y-%m-%d")
+    today_str = signal_date or datetime.now(WIB).strftime("%Y-%m-%d")
     migrate_bsjp_table()
     with sqlite3.connect(path) as conn:
         for s in signals:
@@ -75,6 +78,31 @@ def get_pending_bsjp_signals(signal_date: str) -> list[dict]:
             (signal_date,)
         )
         return [dict(row) for row in cur.fetchall()]
+
+
+def get_latest_pending_bsjp_signals(before_date: str) -> tuple[Optional[str], list[dict]]:
+    """
+    Ambil semua sinyal BSJP berstatus 'pending' dari tanggal sinyal terakhir
+    sebelum before_date (menangani akhir pekan Jumat -> Senin & hari libur).
+    """
+    path = _get_db_path()
+    migrate_bsjp_table()
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT MAX(signal_date) AS target_date
+               FROM bsjp_signals
+               WHERE signal_date < ? AND outcome = 'pending'""",
+            (before_date,)
+        ).fetchone()
+        target_date = row["target_date"] if row else None
+        if not target_date:
+            return None, []
+        cur = conn.execute(
+            "SELECT * FROM bsjp_signals WHERE signal_date=? AND outcome='pending'",
+            (target_date,)
+        )
+        return target_date, [dict(r) for r in cur.fetchall()]
 
 
 def update_bsjp_outcome(ticker: str, signal_date: str, open_price: float,

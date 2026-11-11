@@ -212,3 +212,92 @@ def test_resolve_bsjp_universe_fallback_on_error():
         res = resolve_bsjp_universe()
 
     assert res == ["BBCA", "TLKM"]
+
+
+def test_bsjp_latest_pending_handles_weekend_gap(tmp_path, monkeypatch):
+    """Sinyal Jumat harus ditemukan saat rekap Senin pagi (lewati Sabtu & Minggu)."""
+    from services.bsjp_db import get_latest_pending_bsjp_signals
+
+    db_file = tmp_path / "test_bsjp_weekend.db"
+    monkeypatch.setattr("services.bsjp_db._get_db_path", lambda: str(db_file))
+    migrate_bsjp_table()
+
+    # Simpan sinyal hari Jumat 2026-11-06 dan hari Senin 2026-11-09 (jangan terbaca saat cek Senin)
+    save_bsjp_signals([{"ticker": "BBCA", "score": 88, "close_price": 10000}], signal_date="2026-11-06")
+    save_bsjp_signals([{"ticker": "BMRI", "score": 82, "close_price": 6000}], signal_date="2026-11-09")
+
+    target_date, pending = get_latest_pending_bsjp_signals("2026-11-09")
+    assert target_date == "2026-11-06"
+    assert [p["ticker"] for p in pending] == ["BBCA"]
+
+    # Setelah di-update, Senin tidak lagi menganggap 2026-11-06 pending
+    update_bsjp_outcome("BBCA", "2026-11-06", 10100, 10200, 0.02, "profit")
+    target2, pending2 = get_latest_pending_bsjp_signals("2026-11-09")
+    assert target2 is None
+    assert pending2 == []
+
+
+def test_run_bsjp_rekap_sync_friday_to_monday_end_to_end(tmp_path, monkeypatch):
+    """Pastikan run_bsjp_rekap_sync menangani jeda Jumat->Senin, cutoff < 09:30 WIB, profit/lose & DB update."""
+    import pytz
+    from jobs.scheduler import run_bsjp_rekap_sync
+
+    db_file = tmp_path / "test_rekap_e2e.db"
+    monkeypatch.setattr("services.bsjp_db._get_db_path", lambda: str(db_file))
+    migrate_bsjp_table()
+    save_bsjp_signals(
+        [
+            {"ticker": "BBCA", "score": 90, "close_price": 1000.0},
+            {"ticker": "TLKM", "score": 82, "close_price": 3000.0},
+        ],
+        signal_date="2026-11-06",  # Jumat
+    )
+
+    wib = pytz.timezone("Asia/Jakarta")
+    fake_now = wib.localize(datetime(2026, 11, 9, 9, 30, 0))  # Senin 09:30 WIB
+
+    bars_by_ticker = {
+        "BBCA.JK": pd.DataFrame(
+            {
+                "Open": [1005.0, 1015.0, 1050.0],
+                "High": [1015.0, 1030.0, 1090.0],  # bar ke-3 (>= 09:30) tidak boleh dihitung!
+                "Low": [1000.0, 1010.0, 1040.0],
+                "Close": [1012.0, 1025.0, 1080.0],
+                "Volume": [100_000, 200_000, 300_000],
+            },
+            index=pd.DatetimeIndex(
+                [
+                    wib.localize(datetime(2026, 11, 9, 9, 0)),
+                    wib.localize(datetime(2026, 11, 9, 9, 25)),
+                    wib.localize(datetime(2026, 11, 9, 9, 30)),
+                ]
+            ),
+        ),
+        "TLKM.JK": pd.DataFrame(
+            {
+                "Open": [2980.0, 2970.0],
+                "High": [2990.0, 2980.0],  # < 3000 -> Lose
+                "Low": [2940.0, 2950.0],   # -2.0%
+                "Close": [2960.0, 2965.0],
+                "Volume": [100_000, 150_000],
+            },
+            index=pd.DatetimeIndex(
+                [
+                    wib.localize(datetime(2026, 11, 9, 9, 0)),
+                    wib.localize(datetime(2026, 11, 9, 9, 15)),
+                ]
+            ),
+        ),
+    }
+
+    res = run_bsjp_rekap_sync(now_wib=fake_now, fetch_bars_fn=lambda t: bars_by_ticker.get(t))
+
+    assert res is not None
+    assert res["target_date"] == "2026-11-06"
+    assert res["profit_count"] == 1
+    assert res["lose_count"] == 1
+    assert res["wr"] == 50
+    assert "Rekap BSJP kemaren" in res["msg"]
+    assert "BBCA | 1030 | +3.0% | Profit" in res["msg"]
+    assert "TLKM | 2940 | -2.0% | Lose" in res["msg"]
+    assert get_pending_bsjp_signals("2026-11-06") == []
