@@ -12,7 +12,6 @@ Kriteria Screening (wajib lolos semua — AND):
 """
 
 import logging
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
@@ -20,8 +19,6 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 logger = logging.getLogger(__name__)
-
-_YF_LOCK = threading.Lock()
 
 # Parameter Screener BSJP (sesuai spesifikasi Stockbit screener user)
 BSJP_MIN_PRICE_CHANGE_PCT = 2.0
@@ -47,22 +44,19 @@ except Exception as e:
 
 def _fetch_daily(ticker: str) -> Optional[pd.DataFrame]:
     """
-    Ambil data harian 3 bulan dari yfinance untuk menghitung MA 20, perubahan harga,
-    volume hari ini, dan value hari ini.
+    Ambil data harian 3 bulan dari yfinance via Ticker.history() (thread-safe)
+    untuk menghitung MA 20, perubahan harga, volume hari ini, dan value hari ini.
     """
     try:
         import yfinance as yf
 
         yf_ticker = ticker if ticker.endswith(".JK") else ticker + ".JK"
-        with _YF_LOCK:
-            raw = yf.download(
-                yf_ticker,
-                period="3mo",
-                interval="1d",
-                auto_adjust=True,
-                progress=False,
-                threads=False,
-            )
+        raw = yf.Ticker(yf_ticker).history(
+            period="3mo",
+            interval="1d",
+            auto_adjust=True,
+            timeout=15,
+        )
         if raw is None or raw.empty:
             return None
 
@@ -200,7 +194,7 @@ def evaluate_bsjp_stock(ticker: str, df: Optional[pd.DataFrame] = None) -> Dict[
 def run_bsjp_screener(universe: List[str]) -> List[Dict[str, Any]]:
     """
     Jalankan BSJP screener untuk seluruh universe dengan safe rate-limiting.
-    Menggunakan 3 worker terkendali + micro-delay agar aman dari blokir Yahoo Finance.
+    Menggunakan 4 worker terkendali + micro-delay agar cepat namun tetap aman dari blokir Yahoo Finance.
     Kembalikan daftar saham yang lolos seluruh 5 kriteria, diurutkan terbaik terlebih dahulu.
     """
     results: List[Dict[str, Any]] = []
@@ -209,14 +203,14 @@ def run_bsjp_screener(universe: List[str]) -> List[Dict[str, Any]]:
 
     def _eval(ticker: str):
         try:
-            time.sleep(0.1)
+            time.sleep(0.12)
             return evaluate_bsjp_stock(ticker)
         except Exception as e:
             logger.debug(f"[BSJP] Error on {ticker}: {e}")
             return None
 
     completed = 0
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(_eval, t): t for t in universe}
         for future in as_completed(futures):
             completed += 1
@@ -229,7 +223,7 @@ def run_bsjp_screener(universe: List[str]) -> List[Dict[str, Any]]:
                     f"Val Rp{res['value_today']/1e9:.1f}M)"
                 )
                 logger.info(f"[BSJP] {res['ticker']} LOLOS score={res['score']}")
-            elif completed % 10 == 0 or completed == total:
+            elif completed % 25 == 0 or completed == total:
                 print(f"  ⏳ [{completed}/{total}] Memeriksa saham... (Aman & stabil)")
 
     results.sort(key=lambda x: (x["score"], x.get("value_today") or 0), reverse=True)

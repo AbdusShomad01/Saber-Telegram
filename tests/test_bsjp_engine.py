@@ -183,3 +183,32 @@ def test_bsjp_db_operations(tmp_path, monkeypatch):
     pending_after = get_pending_bsjp_signals("2026-11-06")
     assert len(pending_after) == 1
     assert pending_after[0]["ticker"] == "BMRI"
+
+
+def test_resolve_bsjp_universe_extracts_dicts_and_filters_fca():
+    """resolve_bsjp_universe harus mengekstrak key 'ticker' dari dict full universe tanpa fallback ke 107."""
+    from jobs.scheduler import resolve_bsjp_universe
+
+    fake_full = [
+        {"ticker": "bbca", "board": "Utama"},
+        {"ticker": "BMRI", "board": "Utama"},
+        {"ticker": "BBCA", "board": "Utama"},  # duplikat
+        {"ticker": "FCAA", "board": "Pemantauan"},
+    ]
+    with patch("services.idx_full_universe_service.get_full_idx_universe", return_value=fake_full), \
+         patch("services.idx_full_universe_service.is_fca_stock", side_effect=lambda t, **kw: t == "FCAA"):
+        res = resolve_bsjp_universe()
+
+    assert res == ["BBCA", "BMRI"]
+
+
+def test_resolve_bsjp_universe_fallback_on_error():
+    """Jika get_full_idx_universe gagal, fallback aman ke get_stock_universe."""
+    from jobs.scheduler import resolve_bsjp_universe
+
+    fake_default = [{"ticker": "BBCA"}, {"ticker": "TLKM"}]
+    with patch("services.idx_full_universe_service.get_full_idx_universe", side_effect=RuntimeError("boom")), \
+         patch("services.stock_universe_service.get_stock_universe", return_value=fake_default):
+        res = resolve_bsjp_universe()
+
+    assert res == ["BBCA", "TLKM"]

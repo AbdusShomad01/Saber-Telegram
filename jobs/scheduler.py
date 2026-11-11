@@ -934,17 +934,48 @@ async def job_monitor_tp_sl():
 #  Job: BSJP Scan — Beli Sore Jual Profit (15:45 WIB)
 # ================================================================== #
 
+def resolve_bsjp_universe(settings_obj=None) -> list[str]:
+    """
+    Ambil daftar ticker BEI penuh dari get_full_idx_universe() (list dict / string),
+    filter FCA/duplikat, lalu fallback ke get_stock_universe() jika gagal atau kosong.
+    """
+    from services.stock_universe_service import get_stock_universe
+    from services.idx_full_universe_service import get_full_idx_universe, is_fca_stock
+
+    try:
+        raw_keys = getattr(settings_obj, "GOAPI_KEY", "") if settings_obj is not None else ""
+        goapi_keys = [k.strip() for k in (raw_keys or "").split(",") if k.strip()]
+        universe_raw = get_full_idx_universe(goapi_keys=goapi_keys or None, exclude_fca=False)
+
+        tickers = []
+        seen = set()
+        for item in universe_raw or []:
+            ticker = item.get("ticker") if isinstance(item, dict) else item
+            if not isinstance(ticker, str):
+                continue
+            code = ticker.upper().strip()
+            if not code or code in seen or is_fca_stock(code, goapi_keys=goapi_keys or None):
+                continue
+            seen.add(code)
+            tickers.append(code)
+
+        if tickers:
+            return tickers
+    except Exception as uni_err:
+        logger.warning(f"[BSJP] Full universe fallback ({uni_err})")
+
+    return [s["ticker"] for s in get_stock_universe()]
+
+
 async def job_bsjp_scan():
     """
     BSJP Screener: jalankan pukul 15:45 WIB setiap hari bursa.
-    Ambil universe, scoring tiap saham, kirim sinyal ke Telegram.
+    Ambil universe BEI penuh, screening 5 syarat Stockbit BSJP, kirim sinyal ke Telegram.
     """
     logger.info(f"[BSJP] Starting BSJP scan at {datetime.now()}")
     try:
         from services.bsjp_engine import run_bsjp_screener
         from services.bsjp_db import save_bsjp_signals, migrate_bsjp_table
-        from services.stock_universe_service import get_stock_universe
-        from services.idx_full_universe_service import get_full_idx_universe, is_fca_stock
         from app.config import get_settings
         import os
 
@@ -956,14 +987,8 @@ async def job_bsjp_scan():
         # Migrate tabel jika belum ada
         await asyncio.to_thread(migrate_bsjp_table)
 
-        # Ambil universe: gunakan full universe jika tersedia, fallback default
-        try:
-            universe_raw = await asyncio.to_thread(get_full_idx_universe)
-            universe = [t for t in universe_raw if not is_fca_stock(t)]
-        except Exception:
-            universe_data = get_stock_universe()
-            universe = [s["ticker"] for s in universe_data]
-
+        universe = await asyncio.to_thread(resolve_bsjp_universe, settings_obj)
+        print(f"📊 BSJP Universe siap: {len(universe)} saham BEI.")
         logger.info(f"[BSJP] Universe size: {len(universe)}")
 
         # Jalankan screener
