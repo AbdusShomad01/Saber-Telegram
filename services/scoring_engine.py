@@ -143,6 +143,7 @@ class FilterFunnelStats:
     failed_hard_filter: int = 0
     passed_to_signal: int = 0       # STRONG BUY + BUY + WATCHLIST
     # -- Breakdown Hard Filter --
+    gugur_suspended: int = 0        # Sedang suspen (volume 0 / data berhenti)
     gugur_min_price: int = 0        # Harga <= Rp 10 (Daily) / Rp 50 (Intraday)
     gugur_prev_day_surge: int = 0   # Naik > batas kemarin (Daily > 20% / Intraday > 15%)
     gugur_ara: int = 0              # Sudah atau hampir menyentuh ARA
@@ -169,6 +170,7 @@ class FilterFunnelStats:
             f"  Total saham diproses : {self.total_stocks}\n"
             f"  Lolos Hard Filter    : {self.passed_hard_filter} ({hf_pct:.1f}%)\n"
             f"  Gugur Hard Filter    : {self.failed_hard_filter}\n"
+            f"  ├─ Sedang suspen     : {self.gugur_suspended}\n"
             f"  ├─ Harga di bawah min: {self.gugur_min_price}\n"
             f"  ├─ Naik > 20% Kemarin: {self.gugur_prev_day_surge}\n"
             f"  ├─ Sudah/Hampir ARA  : {self.gugur_ara}\n"
@@ -272,6 +274,7 @@ class ScoringEngine:
         sector_correlation: Optional[Dict[str, Any]] = None,
         ihsg_regime_dict: Optional[Dict[str, Any]] = None,
         pure_technical: bool = False,
+        latest_market_date=None,
     ) -> ScoringResult:
         """
         Score a stock based on analysis engines.
@@ -304,7 +307,12 @@ class ScoringEngine:
         # Track total stocks per scan
         self._scan_stats.total_stocks += 1
 
-        hf_result = self._run_hard_filters(technical, ohlcv_df, data_len, timeframe=timeframe, pure_technical=pure_technical)
+        market_ref_date = latest_market_date if latest_market_date is not None else technical.get("_latest_market_date")
+        hf_result = self._run_hard_filters(
+            technical, ohlcv_df, data_len,
+            timeframe=timeframe, pure_technical=pure_technical,
+            latest_market_date=market_ref_date,
+        )
         if not hf_result.passed:
             result.hard_filter_failed   = True
             result.hard_filter_reason   = hf_result.reason
@@ -312,7 +320,8 @@ class ScoringEngine:
             # Track breakdown kegagalan
             self._scan_stats.failed_hard_filter += 1
             cat = hf_result.category
-            if cat == "min_price":          self._scan_stats.gugur_min_price += 1
+            if cat == "suspended":          self._scan_stats.gugur_suspended += 1
+            elif cat == "min_price":        self._scan_stats.gugur_min_price += 1
             elif cat == "prev_day_surge":   self._scan_stats.gugur_prev_day_surge += 1
             elif cat == "ara_limit":        self._scan_stats.gugur_ara += 1
             elif cat == "adx":              self._scan_stats.gugur_adx += 1
@@ -512,6 +521,70 @@ class ScoringEngine:
     def _is_intraday(timeframe: str = "1d", pure_technical: bool = False) -> bool:
         """Tentukan apakah scan berjalan di mode intraday/pure_technical (bukan scan pagi daily 1d)."""
         return (timeframe in ["15m", "60m", "1h", "60"]) or pure_technical
+
+    def _check_suspended_filter(self, ohlcv_df, timeframe: str = "1d", latest_market_date=None) -> HardFilterResult:
+        """
+        Deteksi dan gugurkan saham yang sedang suspen (pagi 1d maupun siang intraday):
+        1. Tanggal perdagangan terakhir tertinggal dari IHSG (^JKSE) / pasar -> suspen/berhenti diperdagangkan.
+        2. Volume 3 bar terakhir == 0 -> suspen/tidur.
+        3. Volume bar terakhir (daily 1d) atau total volume sesi terakhir (intraday) == 0 -> baru suspen.
+        """
+        if settings.DATA_PROVIDER == "mock" or ohlcv_df is None or len(ohlcv_df) == 0:
+            return HardFilterResult(passed=True)
+
+        try:
+            has_date = "date" in ohlcv_df.columns
+            if latest_market_date is not None and has_date:
+                stock_last_date = pd.to_datetime(ohlcv_df["date"].iloc[-1]).date()
+                ref_date = (
+                    latest_market_date.date()
+                    if hasattr(latest_market_date, "date")
+                    else pd.to_datetime(latest_market_date).date()
+                )
+                if stock_last_date < ref_date:
+                    return HardFilterResult(
+                        passed=False,
+                        category="suspended",
+                        reason=f"Saham suspen / tidak ada transaksi sejak {stock_last_date} (pasar {ref_date})",
+                    )
+
+            if "volume" in ohlcv_df.columns:
+                if float(ohlcv_df["volume"].tail(3).sum() or 0) <= 0:
+                    return HardFilterResult(
+                        passed=False,
+                        category="suspended",
+                        reason="Saham suspen atau tidak likuid (volume 3 bar terakhir = 0)",
+                    )
+
+                is_intraday = self._is_intraday(timeframe)
+                if not is_intraday:
+                    last_vol = float(ohlcv_df["volume"].iloc[-1] or 0)
+                    if last_vol <= 0:
+                        return HardFilterResult(
+                            passed=False,
+                            category="suspended",
+                            reason="Saham suspen / tidak ada transaksi pada hari bursa terakhir (volume = 0)",
+                        )
+                else:
+                    if has_date:
+                        dates = pd.to_datetime(ohlcv_df["date"]).dt.date
+                        last_day_vol = float(ohlcv_df.loc[dates == dates.iloc[-1], "volume"].sum() or 0)
+                        if last_day_vol <= 0:
+                            return HardFilterResult(
+                                passed=False,
+                                category="suspended",
+                                reason="Saham suspen / tidak ada transaksi pada sesi hari terakhir (volume = 0)",
+                            )
+                    elif float(ohlcv_df["volume"].iloc[-1] or 0) <= 0:
+                        return HardFilterResult(
+                            passed=False,
+                            category="suspended",
+                            reason="Saham suspen / tidak ada transaksi (volume = 0)",
+                        )
+        except Exception as e:
+            logger.warning(f"[HardFilter] Gagal mengecek suspended_filter: {e}")
+
+        return HardFilterResult(passed=True)
 
     def _check_min_price_filter(self, ohlcv_df, timeframe: str = "1d") -> HardFilterResult:
         """
@@ -780,12 +853,14 @@ class ScoringEngine:
             )
         return HardFilterResult(passed=True)
 
-    def _run_hard_filters(self, technical: Dict, ohlcv_df, data_len: int, timeframe: str = "1d", pure_technical: bool = False) -> HardFilterResult:
+    def _run_hard_filters(self, technical: Dict, ohlcv_df, data_len: int, timeframe: str = "1d", pure_technical: bool = False, latest_market_date=None) -> HardFilterResult:
         """
         Orkestrasi semua Hard Filter secara berurutan.
         Mengembalikan HardFilterResult pertama yang gagal, atau passed=True jika semua lolos.
         """
+        market_ref = latest_market_date if latest_market_date is not None else technical.get("_latest_market_date")
         for check_fn in [
+            lambda: self._check_suspended_filter(ohlcv_df, timeframe=timeframe, latest_market_date=market_ref),
             lambda: self._check_min_price_filter(ohlcv_df, timeframe=timeframe),
             lambda: self._check_prev_day_gain_filter(ohlcv_df, timeframe=timeframe, pure_technical=pure_technical),
             lambda: self._check_ara_filter(ohlcv_df, timeframe=timeframe),
@@ -799,9 +874,13 @@ class ScoringEngine:
         return HardFilterResult(passed=True)
 
     # -- Backward-compat alias (agar kode lain yang memanggil tidak error) --
-    def _check_hard_filters(self, technical: Dict, ohlcv_df=None, timeframe: str = "1d", pure_technical: bool = False) -> Optional[str]:
+    def _check_hard_filters(self, technical: Dict, ohlcv_df=None, timeframe: str = "1d", pure_technical: bool = False, latest_market_date=None) -> Optional[str]:
         data_len = technical.get("_data_length", 60)
-        r = self._run_hard_filters(technical, ohlcv_df, data_len, timeframe=timeframe, pure_technical=pure_technical)
+        r = self._run_hard_filters(
+            technical, ohlcv_df, data_len,
+            timeframe=timeframe, pure_technical=pure_technical,
+            latest_market_date=latest_market_date,
+        )
         return None if r.passed else r.reason
 
     # ------------------------------------------------------------------ #

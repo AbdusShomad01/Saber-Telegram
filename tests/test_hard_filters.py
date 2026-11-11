@@ -485,5 +485,71 @@ class TestIntradayTightenedFilters:
         assert r.category == "value"
 
 
+# ─────────────────────────────────────────────
+#  Suspended Stock Filter (Pagi 1d & Siang 15m)
+# ─────────────────────────────────────────────
+
+class TestSuspendedFilter:
+    """Saham yang sedang suspen harus langsung gugur di scan pagi maupun scan siang."""
+
+    def test_daily_last_day_zero_volume_fails_immediately(self, engine):
+        """Meskipun 2 hari lalu ramai, jika hari terakhir volume=0 (baru suspen), gugur."""
+        ohlcv = make_ohlcv_df(rows=30)
+        ohlcv.iloc[-1, ohlcv.columns.get_loc("volume")] = 0
+        r = engine._check_suspended_filter(ohlcv, timeframe="1d")
+        assert r.passed is False
+        assert r.category == "suspended"
+
+    def test_daily_stale_date_vs_ihsg_fails_immediately(self, engine):
+        """Jika bar terakhir tertinggal dari tanggal IHSG (^JKSE), langsung dianggap suspen."""
+        ohlcv = make_ohlcv_df(rows=30)
+        latest_ihsg_date = pd.to_datetime(ohlcv["date"].iloc[-1]).date() + pd.Timedelta(days=2)
+        r = engine._check_suspended_filter(ohlcv, timeframe="1d", latest_market_date=latest_ihsg_date)
+        assert r.passed is False
+        assert r.category == "suspended"
+
+    def test_intraday_15m_today_zero_volume_fails_immediately(self, engine):
+        """Di scan siang 15m, jika seluruh sesi hari terakhir bervolume 0 -> gugur."""
+        dates = (
+            [pd.Timestamp("2026-11-10 09:00:00"), pd.Timestamp("2026-11-10 09:15:00")] +
+            [pd.Timestamp("2026-11-11 09:00:00"), pd.Timestamp("2026-11-11 09:15:00")]
+        )
+        ohlcv = pd.DataFrame({
+            "date": dates,
+            "close": [1000.0, 1000.0, 1000.0, 1000.0],
+            "volume": [500_000, 500_000, 0, 0],
+        })
+        r = engine._check_suspended_filter(ohlcv, timeframe="15m")
+        assert r.passed is False
+        assert r.category == "suspended"
+
+    def test_run_hard_filters_catches_suspended_first_and_tracks_stat(self, engine):
+        """_run_hard_filters langsung memfilter saham suspen dengan category 'suspended'."""
+        ohlcv = make_ohlcv_df(rows=30)
+        ohlcv.iloc[-1, ohlcv.columns.get_loc("volume")] = 0
+        tech = make_technical(adx=25.0, atr_percent=2.0, volume_avg_5=10_000_000)
+        r = engine._run_hard_filters(tech, ohlcv, data_len=30, timeframe="1d")
+        assert r.passed is False
+        assert r.category == "suspended"
+
+    def test_scanner_fetch_stock_data_rejects_suspended_without_goapi(self):
+        """ScannerEngine._fetch_stock_data langsung gugurkan saham suspen sebelum memanggil GoAPI."""
+        from unittest.mock import MagicMock
+        from services.scanner_engine import ScannerEngine
+
+        scanner = ScannerEngine.__new__(ScannerEngine)
+        scanner.scoring_engine = ScoringEngine()
+        scanner.data_provider = MagicMock()
+
+        ohlcv = make_ohlcv_df(rows=40)
+        ohlcv.iloc[-1, ohlcv.columns.get_loc("volume")] = 0
+        scanner.data_provider.get_ohlcv.return_value = ohlcv
+
+        res = scanner._fetch_stock_data("ABCD", interval="1d", period_days=365, pure_technical=False)
+        assert "error" in res
+        assert "suspen" in res["error"].lower()
+        scanner.data_provider.get_broker_summary.assert_not_called()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

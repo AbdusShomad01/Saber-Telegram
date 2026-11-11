@@ -148,17 +148,29 @@ class ScannerEngine:
     # ------------------------------------------------------------------ #
     #  Parallel Data Fetching
     # ------------------------------------------------------------------ #
-    def _fetch_stock_data(self, ticker: str, interval: str, period_days: int, pure_technical: bool = False) -> Dict[str, Any]:
+    def _get_latest_market_date(self, interval: str, period_days: int = 30):
+        """Ambil tanggal bar perdagangan terbaru dari IHSG (^JKSE) untuk deteksi saham suspen."""
+        try:
+            ihsg_df = self.data_provider.get_ohlcv("^JKSE", period_days=period_days, interval=interval)
+            if ihsg_df is not None and not ihsg_df.empty and "date" in ihsg_df.columns:
+                return pd.to_datetime(ihsg_df["date"].iloc[-1]).date()
+        except Exception as e:
+            logger.warning(f"[Scanner] Gagal mengambil tanggal pasar referensi (^JKSE): {e}")
+        return None
+
+    def _fetch_stock_data(self, ticker: str, interval: str, period_days: int, pure_technical: bool = False, latest_market_date=None) -> Dict[str, Any]:
         """Fetch all data for a single stock (runs in thread pool for parallelism)."""
         try:
             ohlcv = self.data_provider.get_ohlcv(ticker, period_days=period_days, interval=interval)
             if ohlcv.empty or len(ohlcv) < 30:
                 return {"ticker": ticker, "error": f"Data tidak cukup ({len(ohlcv)} rows)"}
 
-            # Filter out suspended or completely illiquid stocks
-            last_3_vol = ohlcv["volume"].tail(3).sum()
-            if last_3_vol == 0:
-                return {"ticker": ticker, "error": "Saham suspen atau tidak likuid (volume 0)"}
+            # Langsung gugurkan saham yang sedang suspen (pagi & siang)
+            susp_res = self.scoring_engine._check_suspended_filter(
+                ohlcv, timeframe=interval, latest_market_date=latest_market_date
+            )
+            if not susp_res.passed:
+                return {"ticker": ticker, "error": susp_res.reason}
 
             # Get the last actual trading day
             last_date_val = ohlcv["date"].iloc[-1]
@@ -175,7 +187,11 @@ class ScannerEngine:
                 # Early Hard Filter Check to save GoAPI tokens
                 technical = TechnicalEngine(ohlcv).compute_all()
                 technical["_data_length"] = len(ohlcv)
-                hf_err = self.scoring_engine._check_hard_filters(technical, ohlcv, timeframe=interval, pure_technical=pure_technical)
+                hf_err = self.scoring_engine._check_hard_filters(
+                    technical, ohlcv, timeframe=interval,
+                    pure_technical=pure_technical,
+                    latest_market_date=latest_market_date,
+                )
                 
                 if hf_err is not None:
                     broker_data = pd.DataFrame(columns=["date", "broker_code", "buy_lot", "sell_lot", "net_lot", "buy_value", "sell_value", "investor_type", "broker_category"])
@@ -189,6 +205,7 @@ class ScannerEngine:
                 "ohlcv": ohlcv,
                 "broker_data": broker_data,
                 "ff_data": ff_data,
+                "latest_market_date": latest_market_date,
             }
 
             # Multi-TF: fetch daily trend if we're in intraday mode
@@ -199,14 +216,14 @@ class ScannerEngine:
         except Exception as e:
             return {"ticker": ticker, "error": str(e)}
 
-    async def _fetch_all_data_parallel(self, tickers: List[str], interval: str, period_days: int, pure_technical: bool = False) -> List[Dict]:
+    async def _fetch_all_data_parallel(self, tickers: List[str], interval: str, period_days: int, pure_technical: bool = False, latest_market_date=None) -> List[Dict]:
         """Fetch data for all tickers in parallel using ThreadPoolExecutor."""
         loop = asyncio.get_event_loop()
         sem = asyncio.Semaphore(10)
 
         async def fetch_bounded(t):
             async with sem:
-                return await loop.run_in_executor(self._executor, self._fetch_stock_data, t, interval, period_days, pure_technical)
+                return await loop.run_in_executor(self._executor, self._fetch_stock_data, t, interval, period_days, pure_technical, latest_market_date)
 
         tasks = [fetch_bounded(t) for t in tickers]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -242,20 +259,24 @@ class ScannerEngine:
                 period_days = 120
 
             # Use prefetched data if available (from parallel scan), otherwise fetch fresh
+            latest_market_date = None
             if prefetched_data and prefetched_data.get("ticker") == ticker:
                 ohlcv = prefetched_data["ohlcv"]
                 broker_data = prefetched_data["broker_data"]
                 ff_data = prefetched_data["ff_data"]
                 daily_trend = prefetched_data.get("daily_trend", {})
+                latest_market_date = prefetched_data.get("latest_market_date")
             else:
                 ohlcv = self.data_provider.get_ohlcv(ticker, period_days=period_days, interval=interval)
                 if ohlcv.empty or len(ohlcv) < 30:
                     raise ValueError(f"Data tidak cukup atau tidak ditemukan untuk saham {ticker}.")
 
-                # Verify volume for suspended stock check in fallback mode
-                last_3_vol = ohlcv["volume"].tail(3).sum()
-                if last_3_vol == 0:
-                    raise ValueError(f"Saham {ticker} sedang suspen atau tidak likuid (volume 0).")
+                latest_market_date = self._get_latest_market_date(interval)
+                susp_res = self.scoring_engine._check_suspended_filter(
+                    ohlcv, timeframe=interval, latest_market_date=latest_market_date
+                )
+                if not susp_res.passed:
+                    raise ValueError(f"{ticker}: {susp_res.reason}")
 
                 last_date_val = ohlcv["date"].iloc[-1]
                 if isinstance(last_date_val, datetime.date):
@@ -270,7 +291,11 @@ class ScannerEngine:
                     # Early Hard Filter Check to save GoAPI tokens
                     technical = TechnicalEngine(ohlcv).compute_all()
                     technical["_data_length"] = len(ohlcv)
-                    hf_err = self.scoring_engine._check_hard_filters(technical, ohlcv, timeframe=interval, pure_technical=pure_technical)
+                    hf_err = self.scoring_engine._check_hard_filters(
+                        technical, ohlcv, timeframe=interval,
+                        pure_technical=pure_technical,
+                        latest_market_date=latest_market_date,
+                    )
                     
                     if hf_err is not None:
                         logger.debug(f"[{ticker}] Early Hard Filter fail (scan_single): {hf_err} -> Skipping GoAPI")
@@ -323,6 +348,7 @@ class ScannerEngine:
                 sector_correlation=sector_correlation,
                 ihsg_regime_dict=ihsg_regime,
                 pure_technical=pure_technical,
+                latest_market_date=latest_market_date,
             )
 
             if score_result.hard_filter_failed:
@@ -558,9 +584,14 @@ class ScannerEngine:
             period_days = 120
 
         # ========== PHASE 1: Parallel data fetch ==========
+        latest_market_date = self._get_latest_market_date(interval)
         mode_text = "PURE TEKNIKAL" if pure_technical else "FULL (Teknikal + Bandar + Asing)"
-        logger.info(f"[scan_all] Phase 1: Fetching data for {len(tickers)} stocks in parallel [{mode_text}]...")
-        all_data = await self._fetch_all_data_parallel(tickers, interval, period_days, pure_technical=pure_technical)
+        logger.info(f"[scan_all] Phase 1: Fetching data for {len(tickers)} stocks in parallel [{mode_text}] (market_ref={latest_market_date})...")
+        all_data = await self._fetch_all_data_parallel(
+            tickers, interval, period_days,
+            pure_technical=pure_technical,
+            latest_market_date=latest_market_date,
+        )
         logger.info(f"[scan_all] Phase 1 complete: {len(all_data)} stocks fetched successfully.")
 
         # ========== PHASE 2: Score all (deterministic, fast) ==========
