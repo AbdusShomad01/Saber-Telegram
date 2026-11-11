@@ -14,13 +14,31 @@ Strategy:
 5. Cache results for the trading session (expires every 6 hours)
 """
 
+import os
+import re
 import time
 import logging
+import zipfile
+import xml.etree.ElementTree as ET
 from datetime import date, timedelta
 from typing import List, Dict, Optional, Set
 import threading
 
 logger = logging.getLogger(__name__)
+
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DAFTAR_SAHAM_CANDIDATES = (
+    os.path.join(_PROJECT_ROOT, "Data", "daftar-saham.xlsx"),
+    os.path.join(_PROJECT_ROOT, "data", "daftar-saham.xlsx"),
+)
+
+
+def _find_daftar_saham_path() -> Optional[str]:
+    """Cari file daftar-saham.xlsx secara case-insensitive terhadap nama folder Data/data di Linux."""
+    for path in _DAFTAR_SAHAM_CANDIDATES:
+        if os.path.exists(path):
+            return path
+    return None
 
 # Monkeypatch yfinance User-Agent to bypass Yahoo Finance 429 rate limit
 try:
@@ -451,6 +469,107 @@ def _validate_ticker_is_active(ticker: str) -> bool:
         return False
 
 
+def _excel_col_index(cell_ref: str) -> Optional[int]:
+    """Konversi referensi sel Excel (misal 'B12') menjadi indeks kolom 0-based."""
+    m = re.match(r"([A-Za-z]+)", cell_ref or "")
+    if not m:
+        return None
+    idx = 0
+    for ch in m.group(1).upper():
+        idx = idx * 26 + (ord(ch) - 64)
+    return idx - 1
+
+
+def load_universe_from_daftar_saham(filepath: Optional[str] = None) -> List[Dict]:
+    """
+    Baca daftar seluruh saham BEI dari file Excel `Data/daftar-saham.xlsx` (atau `data/daftar-saham.xlsx`)
+    menggunakan stdlib `zipfile` + `xml.etree.ElementTree` (tanpa butuh openpyxl).
+    """
+    xlsx_path = filepath or _find_daftar_saham_path()
+    if not xlsx_path or not os.path.exists(xlsx_path):
+        return []
+
+    try:
+        ns_uri = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+        with zipfile.ZipFile(xlsx_path, "r") as zf:
+            names = set(zf.namelist())
+            strings: List[str] = []
+            if "xl/sharedStrings.xml" in names:
+                ss_root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+                for si in ss_root.findall(f"{{{ns_uri}}}si"):
+                    strings.append("".join(t.text or "" for t in si.iter(f"{{{ns_uri}}}t")))
+
+            sheet_path = "xl/worksheets/sheet1.xml"
+            if sheet_path not in names:
+                sheet_candidates = sorted(n for n in names if n.startswith("xl/worksheets/sheet") and n.endswith(".xml"))
+                if not sheet_candidates:
+                    return []
+                sheet_path = sheet_candidates[0]
+
+            sheet_root = ET.fromstring(zf.read(sheet_path))
+            rows: List[List[str]] = []
+            for row_el in sheet_root.iter(f"{{{ns_uri}}}row"):
+                row_map: Dict[int, str] = {}
+                max_col = -1
+                for i, cell in enumerate(row_el.iter(f"{{{ns_uri}}}c")):
+                    ci = _excel_col_index(cell.attrib.get("r", ""))
+                    if ci is None:
+                        ci = i
+                    max_col = max(max_col, ci)
+                    ctype = cell.attrib.get("t")
+                    v_el = cell.find(f"{{{ns_uri}}}v")
+                    is_el = cell.find(f"{{{ns_uri}}}is")
+                    if v_el is not None and v_el.text is not None:
+                        val = strings[int(v_el.text)] if ctype == "s" else v_el.text
+                    elif is_el is not None:
+                        val = "".join(x.text or "" for x in is_el.iter(f"{{{ns_uri}}}t"))
+                    else:
+                        val = ""
+                    row_map[ci] = str(val).strip()
+                if max_col >= 0:
+                    rows.append([row_map.get(k, "") for k in range(max_col + 1)])
+
+        if len(rows) < 2:
+            return []
+
+        headers = [h.strip().lower() for h in rows[0]]
+        code_col = next((i for i, h in enumerate(headers) if h in ("code", "kode", "ticker")), 1)
+        name_col = next((i for i, h in enumerate(headers) if "name" in h or "nama" in h), 2)
+        board_col = next((i for i, h in enumerate(headers) if "board" in h or "papan" in h), 5)
+
+        try:
+            from services.stock_universe_service import DEFAULT_STOCK_UNIVERSE
+            curated = {s["ticker"]: s for s in DEFAULT_STOCK_UNIVERSE}
+        except Exception:
+            curated = {}
+
+        stocks: List[Dict] = []
+        seen: Set[str] = set()
+        for row in rows[1:]:
+            if code_col >= len(row):
+                continue
+            code = row[code_col].upper().strip()
+            if not code or not code.isalpha() or len(code) < 2 or len(code) > 5 or code in seen:
+                continue
+            seen.add(code)
+            meta = curated.get(code, {})
+            name = (row[name_col] if name_col < len(row) and row[name_col] else meta.get("name") or f"{code} Tbk")
+            board = (row[board_col] if board_col < len(row) and row[board_col] else meta.get("board") or "IDX")
+            stocks.append({
+                "ticker": code,
+                "name": name,
+                "sector": meta.get("sector", "Unknown"),
+                "subsector": meta.get("subsector", "Unknown"),
+                "board": board,
+            })
+
+        logger.info(f"[Universe] Loaded {len(stocks)} stocks from {xlsx_path}")
+        return stocks
+    except Exception as e:
+        logger.warning(f"[Universe] Failed to load {xlsx_path}: {e}")
+        return []
+
+
 def get_full_idx_universe(
     goapi_keys: Optional[List[str]] = None,
     exclude_fca: bool = False,      # Dinonaktifkan: tidak ada lagi pembatasan FCA
@@ -492,42 +611,44 @@ def get_full_idx_universe(
             logger.info(f"[FCA] Total FCA tickers after merge: {len(fca_tickers)}")
 
     # ---- Step 2: Fetch all IDX stocks ----
-    all_stocks: List[Dict] = []
+    # Prioritas 1: File resmi lokal data/daftar-saham.xlsx (semua saham BEI)
+    from_local_excel = False
+    all_stocks: List[Dict] = load_universe_from_daftar_saham()
+    if all_stocks:
+        from_local_excel = True
+        logger.info(f"[Universe] Using local daftar-saham.xlsx: {len(all_stocks)} stocks")
 
-    # Try GoAPI first
-    if goapi_keys:
+    # Fallback: GoAPI / IDX website scraping / Yahoo screener / hardcoded
+    if not all_stocks and goapi_keys:
         goapi_stocks = _fetch_all_idx_tickers_from_goapi(goapi_keys)
         if goapi_stocks:
             all_stocks = goapi_stocks
 
-    # Try IDX website scraping / fallback
     if not all_stocks:
         logger.info("[Universe] Trying IDX website scraper...")
         all_stocks = _scrape_idx_tickers_from_web()
 
-    # Try yfinance screener
     if not all_stocks:
         logger.info("[Universe] Trying yfinance screener...")
         all_stocks = _fetch_all_idx_tickers_yfinance()
 
-    # If all external sources fail, log error
     if not all_stocks:
         logger.error("[Universe] All external sources failed! Using empty universe.")
         return []
 
-    # --- Always supplement with DEFAULT_STOCK_UNIVERSE (contains curated data & sector info) ---
-    # This ensures we never miss important stocks even if the hardcoded list is incomplete.
-    try:
-        from services.stock_universe_service import DEFAULT_STOCK_UNIVERSE
-        existing_tickers = {s.get("ticker", "") for s in all_stocks}
-        for stock in DEFAULT_STOCK_UNIVERSE:
-            t = stock.get("ticker", "").upper()
-            if t and t not in existing_tickers:
-                all_stocks.append(stock)
-                existing_tickers.add(t)
-        logger.info(f"[Universe] After merging DEFAULT_STOCK_UNIVERSE: {len(all_stocks)} total")
-    except Exception as e:
-        logger.warning(f"[Universe] Could not merge DEFAULT_STOCK_UNIVERSE: {e}")
+    # Supplement DEFAULT_STOCK_UNIVERSE hanya jika tidak memakai file lokal daftar-saham.xlsx
+    if not from_local_excel:
+        try:
+            from services.stock_universe_service import DEFAULT_STOCK_UNIVERSE
+            existing_tickers = {s.get("ticker", "") for s in all_stocks}
+            for stock in DEFAULT_STOCK_UNIVERSE:
+                t = stock.get("ticker", "").upper()
+                if t and t not in existing_tickers:
+                    all_stocks.append(stock)
+                    existing_tickers.add(t)
+            logger.info(f"[Universe] After merging DEFAULT_STOCK_UNIVERSE: {len(all_stocks)} total")
+        except Exception as e:
+            logger.warning(f"[Universe] Could not merge DEFAULT_STOCK_UNIVERSE: {e}")
 
     logger.info(f"[Universe] Raw universe: {len(all_stocks)} stocks before filtering")
 
@@ -547,13 +668,13 @@ def get_full_idx_universe(
             continue
         seen_tickers.add(ticker)
 
-        # Skip FCA stocks
+        # Skip FCA stocks (hanya jika exclude_fca=True)
         if exclude_fca and ticker in fca_tickers:
             logger.debug(f"[Filter] Skipping FCA stock: {ticker}")
             continue
 
-        # Skip Suspended stocks
-        if exclude_suspended and ticker in KNOWN_SUSPENDED_TICKERS:
+        # Skip Suspended stocks hanya pada mode eksternal fallback (jika dari daftar-saham.xlsx, ambil semua)
+        if not from_local_excel and exclude_suspended and ticker in KNOWN_SUSPENDED_TICKERS:
             logger.debug(f"[Filter] Skipping Suspended stock: {ticker}")
             continue
 

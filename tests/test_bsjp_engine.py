@@ -301,3 +301,28 @@ def test_run_bsjp_rekap_sync_friday_to_monday_end_to_end(tmp_path, monkeypatch):
     assert "BBCA | 1030 | +3.0% | Profit" in res["msg"]
     assert "TLKM | 2940 | -2.0% | Lose" in res["msg"]
     assert get_pending_bsjp_signals("2026-11-06") == []
+
+
+def test_load_universe_from_daftar_saham_all_stocks(monkeypatch):
+    """Pastikan data/daftar-saham.xlsx terbaca penuh (~963 emiten) tanpa openpyxl."""
+    import services.idx_full_universe_service as uni_mod
+    from jobs.scheduler import resolve_bsjp_universe
+    from services.stock_universe_service import get_stock_by_ticker
+
+    # Reset session cache agar benar-benar membaca ulang file lokal
+    monkeypatch.setattr(uni_mod, "_UNIVERSE_CACHE", None)
+    monkeypatch.setattr(uni_mod, "_CACHE_TIMESTAMP", 0)
+
+    excel_stocks = uni_mod.load_universe_from_daftar_saham()
+    assert len(excel_stocks) == 963
+    tickers = [s["ticker"] for s in excel_stocks]
+    assert "BBCA" in tickers
+    assert "AALI" in tickers
+    assert "AISA" in tickers
+
+    full_universe = uni_mod.get_full_idx_universe(exclude_fca=False)
+    assert len(full_universe) == 963
+
+    bsjp_tickers = resolve_bsjp_universe()
+    assert len(bsjp_tickers) == 963
+    assert all(get_stock_by_ticker(t) is not None for t in ("AALI", "AISA", "BBCA"))

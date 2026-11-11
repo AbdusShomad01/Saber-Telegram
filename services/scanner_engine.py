@@ -533,25 +533,19 @@ class ScannerEngine:
         """Scan all stocks in the universe with parallel data fetching.
         
         - In pure_technical mode: Only technical indicators are evaluated (Noon screener).
-        - In DAY_TRADE_MODE: Uses the FULL IDX universe (all stocks except FCA & delisted).
-        - In normal mode: Uses the curated DEFAULT_STOCK_UNIVERSE (~160 stocks).
+        - Uses full IDX universe (prioritizing data/daftar-saham.xlsx) for morning & noon scans.
         """
         settings = get_settings()
 
-        # Choose universe based on mode
-        if settings.DAY_TRADE_MODE:
-            logger.info("[scan_all] DAY_TRADE_MODE ON — Loading FULL IDX universe (excluding FCA & delisted)...")
-            goapi_keys = [
-                k.strip() for k in (settings.GOAPI_KEY or "").split(",") if k.strip()
-            ]
-            universe = get_full_idx_universe(goapi_keys=goapi_keys or None, exclude_fca=False, min_price=10)
-            if not universe:
-                logger.warning("[scan_all] Full IDX universe is empty! Falling back to default universe.")
-                universe = get_stock_universe()
-            logger.info(f"[scan_all] Intraday universe loaded: {len(universe)} stocks")
-        else:
+        logger.info("[scan_all] Loading FULL IDX universe (daftar-saham.xlsx / fallback)...")
+        goapi_keys = [
+            k.strip() for k in (settings.GOAPI_KEY or "").split(",") if k.strip()
+        ]
+        universe = get_full_idx_universe(goapi_keys=goapi_keys or None, exclude_fca=False, min_price=10)
+        if not universe:
+            logger.warning("[scan_all] Full IDX universe is empty! Falling back to default universe.")
             universe = get_stock_universe()
-            logger.info(f"[scan_all] Standard universe: {len(universe)} stocks")
+        logger.info(f"[scan_all] Universe loaded: {len(universe)} stocks")
 
         tickers = [s["ticker"] for s in universe]
 
