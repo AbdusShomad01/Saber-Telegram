@@ -25,6 +25,80 @@ CONFIDENCE_BAR = {
 }
 
 
+BANDAR_SIGNAL_DISPLAY = {
+    "strong_accumulation": "🟢🟢 STRONG_BUY",
+    "strong_buy": "🟢🟢 STRONG_BUY",
+    "accumulation": "🟢 BUY",
+    "buy": "🟢 BUY",
+    "neutral": "⚪ NEUTRAL",
+    "distribution": "🔴 SELL",
+    "sell": "🔴 SELL",
+    "strong_distribution": "🔴🔴 STRONG_SELL",
+    "strong_sell": "🔴🔴 STRONG_SELL",
+}
+
+
+def _format_lot_compact(lots: float | int) -> str:
+    """Format total net lot ringkas, contoh: +225K lot, -38K lot, +2.5K lot."""
+    val = int(round(float(lots or 0)))
+    if val == 0:
+        return "0 lot"
+    sign = "+" if val > 0 else "-"
+    abs_val = abs(val)
+    if abs_val >= 1_000_000:
+        txt = f"{abs_val / 1_000_000.0:.1f}".rstrip("0").rstrip(".")
+        return f"{sign}{txt}M lot"
+    if abs_val >= 10_000:
+        return f"{sign}{int(round(abs_val / 1_000.0)):,}K lot"
+    if abs_val >= 1_000:
+        txt = f"{abs_val / 1_000.0:.1f}".rstrip("0").rstrip(".")
+        return f"{sign}{txt}K lot"
+    return f"{sign}{abs_val:,} lot"
+
+
+def _format_broker_side(header: str, brokers: list, lots_map: dict, sign: str) -> list[str]:
+    """Format daftar top 3 broker buyer/seller beserta jumlah lot-nya."""
+    if not brokers:
+        return []
+    out = [header]
+    for code in brokers[:3]:
+        lot = lots_map.get(code)
+        if lot is not None:
+            out.append(f"{code} : {sign}{abs(int(lot)):,} lot")
+        else:
+            out.append(f"{code}")
+    return out
+
+
+def _format_bandarmology_lines(bandar_data: dict, is_pure_tech: bool) -> list[str]:
+    """Format blok Bandarmology Telegram (scan pagi detail vs maintenance/siang)."""
+    is_real = bandar_data.get("is_real_data", False) if bandar_data else False
+    if is_pure_tech or not is_real or not bandar_data:
+        return ["🏦 Bandarmology: Data sedang maintenance"]
+
+    raw_sig = str(bandar_data.get("bandar_signal", "neutral") or "neutral").lower().strip()
+    sig_label = BANDAR_SIGNAL_DISPLAY.get(raw_sig, "⚪ NEUTRAL")
+
+    sm_net = bandar_data.get("smart_money_net_latest")
+    if sm_net is None:
+        sm_net = bandar_data.get("smart_money_flow", 0) or 0
+
+    lines = [
+        "🏦 Bandarmology:",
+        f"Sinyal Bandar: {sig_label}",
+        f"Smart Money Net: {_format_lot_compact(sm_net)}",
+    ]
+
+    top_buyers = bandar_data.get("top_buyers", [])
+    top_sellers = bandar_data.get("top_sellers", [])
+    top_buyers_lots = bandar_data.get("top_buyers_lots", {}) or {}
+    top_sellers_lots = bandar_data.get("top_sellers_lots", {}) or {}
+
+    lines.extend(_format_broker_side("🟢 Top Buyer:", top_buyers, top_buyers_lots, "+"))
+    lines.extend(_format_broker_side("🔴 Top Seller:", top_sellers[::-1], top_sellers_lots, "-"))
+    return lines
+
+
 def format_signal_message(signal_data: dict) -> str:
     """
     Format a signal into a Telegram-ready message.
@@ -147,22 +221,7 @@ def format_signal_message(signal_data: dict) -> str:
     # Bandarmology
     bandar_data = signal_data.get("bandarmology", {})
     is_pure_tech = bool(signal_data.get("pure_technical", False))
-    is_real = bandar_data.get("is_real_data", False)
-
-    if is_pure_tech or not is_real or not bandar_data:
-        bandar_str = "Data sedang maintenance"
-    else:
-        bandar_sig = bandar_data.get("bandar_signal", "neutral").replace("_", " ").title()
-        top_buyers = bandar_data.get("top_buyers", [])
-        top_sellers = bandar_data.get("top_sellers", [])
-        if top_buyers and top_sellers:
-            b_str = ", ".join(top_buyers[:2])
-            s_str = ", ".join(top_sellers[::-1][:2])
-            bandar_str = f"{bandar_sig} (Top Buyer: {b_str} | Top Seller: {s_str})"
-        elif bandar_sig and bandar_sig != "Neutral":
-            bandar_str = bandar_sig
-        else:
-            bandar_str = "Data sedang maintenance"
+    bandar_lines = _format_bandarmology_lines(bandar_data, is_pure_tech)
 
     # Beta & Volatilitas
     beta = float(tech.get("beta") or signal_data.get("beta") or 1.0)
@@ -216,7 +275,7 @@ def format_signal_message(signal_data: dict) -> str:
         f"- Chart: {chart_pattern_str}",
         f"- Candle: {candle_pattern_str}",
         "",
-        f"🏦 Bandarmology: {bandar_str}",
+        *bandar_lines,
         "",
         f"📈 Beta: {beta:.2f} ({beta_label}) | Volatilitas: {volatility:.0f}%",
     ]

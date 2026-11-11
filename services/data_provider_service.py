@@ -599,6 +599,7 @@ class DataProviderService:
                 })
 
         df = pd.DataFrame(rows)
+        df.attrs["is_mock"] = True
         logger.info(f"Generated {len(df)} mock broker rows for {ticker}")
         return df
 

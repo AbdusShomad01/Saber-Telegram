@@ -44,6 +44,8 @@ class BandarmologyEngine:
         """
         if self.df.empty or len(self.df) < 5:
             return False
+        if self.df.attrs.get("is_mock"):
+            return False
         # Cek jumlah hari unik (boleh 1 hari karena API kadang hanya sedia EOD hari terakhir)
         if "date" in self.df.columns:
             unique_dates = self.df["date"].nunique()
@@ -72,6 +74,7 @@ class BandarmologyEngine:
             "top_buyers_lots": {},
             "top_sellers_lots": {},
             "smart_money_flow": 0,
+            "smart_money_net_latest": 0,
             "retail_flow": 0,
             "concentration_ratio": 0,
             "is_real_data": False,
@@ -197,8 +200,16 @@ class BandarmologyEngine:
         di_flow = self.df.loc[di_mask, "net_lot"].sum() if di_mask.any() else 0
         fg_flow = self.df.loc[fg_mask, "net_lot"].sum() if fg_mask.any() else 0
 
+        latest_df = self._get_latest_date_df()
+        if not latest_df.empty:
+            sm_latest_mask = latest_df["broker_code"].isin(self.SMART_MONEY_BROKERS)
+            sm_net_latest = int(latest_df.loc[sm_latest_mask, "net_lot"].sum()) if sm_latest_mask.any() else 0
+        else:
+            sm_net_latest = 0
+
         return {
             "smart_money_flow": int(sm_flow),
+            "smart_money_net_latest": sm_net_latest,
             "retail_flow": int(rt_flow),
             "domestic_inst_flow": int(di_flow),
             "foreign_broker_flow": int(fg_flow),
