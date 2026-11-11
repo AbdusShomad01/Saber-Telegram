@@ -144,10 +144,10 @@ class FilterFunnelStats:
     passed_to_signal: int = 0       # STRONG BUY + BUY + WATCHLIST
     # -- Breakdown Hard Filter --
     gugur_min_price: int = 0        # Harga <= Rp 10 (Daily) / Rp 50 (Intraday)
-    gugur_prev_day_surge: int = 0   # Naik > 15% di hari sebelumnya
+    gugur_prev_day_surge: int = 0   # Naik > batas kemarin (Daily > 20% / Intraday > 15%)
     gugur_ara: int = 0              # Sudah atau hampir menyentuh ARA
-    gugur_adx: int = 0              # ADX < 15
-    gugur_atr: int = 0              # ATR > 7%
+    gugur_adx: int = 0              # ADX < 12 (Daily)
+    gugur_atr: int = 0              # ATR > batas (Daily > 10% / Intraday > 7%)
     gugur_volume: int = 0           # hanya gagal volume lot
     gugur_value: int = 0            # hanya gagal value IDR
     gugur_volume_dan_value: int = 0 # gagal keduanya
@@ -170,10 +170,10 @@ class FilterFunnelStats:
             f"  Lolos Hard Filter    : {self.passed_hard_filter} ({hf_pct:.1f}%)\n"
             f"  Gugur Hard Filter    : {self.failed_hard_filter}\n"
             f"  ├─ Harga di bawah min: {self.gugur_min_price}\n"
-            f"  ├─ Naik > 15% Kemarin: {self.gugur_prev_day_surge}\n"
+            f"  ├─ Naik > 20% Kemarin: {self.gugur_prev_day_surge}\n"
             f"  ├─ Sudah/Hampir ARA  : {self.gugur_ara}\n"
-            f"  ├─ ADX < 15          : {self.gugur_adx}\n"
-            f"  ├─ ATR > 7%          : {self.gugur_atr}\n"
+            f"  ├─ ADX < 12          : {self.gugur_adx}\n"
+            f"  ├─ ATR > 10%         : {self.gugur_atr}\n"
             f"  ├─ Volume kurang     : {self.gugur_volume}\n"
             f"  ├─ Value kurang      : {self.gugur_value}\n"
             f"  └─ Volume & Value    : {self.gugur_volume_dan_value}\n"
@@ -493,16 +493,25 @@ class ScoringEngine:
     #  Hard Filters — refactored (Masalah 1, 2, 4)
     # ------------------------------------------------------------------ #
 
-    ADX_HARD_FILTER_THRESHOLD = 15   # turun dari 20; zona 15-20 dinilai oleh scoring engine
-    ADX_WARMUP_DAYS           = 28   # Wilder's smoothing butuh ~28 bar untuk stabil
-    MIN_AVG_VOLUME_LOT        = 500_000         # 500 ribu lembar (~5.000 lot) untuk daily
-    MIN_AVG_VALUE_IDR         = 2_000_000_000   # Rp 2 miliar untuk daily
-    MIN_AVG_VOLUME_LOT_INTRADAY = 200_000       # 200 ribu lembar (~2.000 lot) untuk intraday (diperketat dari 100k)
-    MIN_AVG_VALUE_IDR_INTRADAY  = 2_000_000_000 # Rp 2 miliar untuk intraday (diperketat dari 1M)
-    MAX_ATR_PCT               = 7.0  # %
-    MAX_PREV_DAY_GAIN_PCT     = 15.0 # % (saham naik > 15% di hari sebelumnya dikeluarkan)
-    MIN_PRICE                 = 10.0 # Rp (saham > 10 tetap dimasukkan, <= 10 dikeluarkan)
-    MIN_PRICE_INTRADAY        = 50.0 # Rp (intraday: saham <= 50 dikeluarkan karena risiko FCA / illiquid)
+    ADX_HARD_FILTER_THRESHOLD     = 12              # min ADX 12 untuk daily (pagi hari)
+    ADX_WARMUP_DAYS               = 28              # Wilder's smoothing butuh ~28 bar untuk stabil
+    DAILY_LIQUIDITY_WINDOW_DAYS   = 5               # rata-rata 5 hari untuk volume & value daily
+    INTRADAY_LIQUIDITY_WINDOW_BARS = 20             # rata-rata 20 bar untuk volume & value intraday
+    MIN_AVG_VOLUME_LOT            = 200_000         # 200 ribu lembar/hari (avg 5 hari) untuk daily
+    MIN_AVG_VALUE_IDR             = 1_000_000_000   # Rp 1 miliar/hari (avg 5 hari) untuk daily
+    MIN_AVG_VOLUME_LOT_INTRADAY   = 200_000         # 200 ribu lembar (~2.000 lot) untuk intraday
+    MIN_AVG_VALUE_IDR_INTRADAY    = 2_000_000_000   # Rp 2 miliar untuk intraday
+    MAX_ATR_PCT                   = 10.0            # % untuk daily (pagi hari)
+    MAX_ATR_PCT_INTRADAY          = 7.0             # % untuk intraday
+    MAX_PREV_DAY_GAIN_PCT         = 20.0            # % untuk daily (saham naik > 20% kemarin gugur)
+    MAX_PREV_DAY_GAIN_PCT_INTRADAY = 15.0           # % untuk intraday
+    MIN_PRICE                     = 10.0            # Rp (saham > 10 tetap dimasukkan, <= 10 dikeluarkan)
+    MIN_PRICE_INTRADAY            = 50.0            # Rp (intraday: saham <= 50 dikeluarkan karena risiko FCA / illiquid)
+
+    @staticmethod
+    def _is_intraday(timeframe: str = "1d", pure_technical: bool = False) -> bool:
+        """Tentukan apakah scan berjalan di mode intraday/pure_technical (bukan scan pagi daily 1d)."""
+        return (timeframe in ["15m", "60m", "1h", "60"]) or pure_technical
 
     def _check_min_price_filter(self, ohlcv_df, timeframe: str = "1d") -> HardFilterResult:
         """
@@ -515,7 +524,7 @@ class ScoringEngine:
 
         try:
             last_price = float(ohlcv_df["close"].iloc[-1])
-            is_intraday = (timeframe in ["15m", "60m", "1h", "60"])
+            is_intraday = self._is_intraday(timeframe)
             min_p = self.MIN_PRICE_INTRADAY if is_intraday else self.MIN_PRICE
             if last_price <= min_p:
                 return HardFilterResult(
@@ -622,14 +631,20 @@ class ScoringEngine:
 
         return HardFilterResult(passed=True)
 
-    def _check_prev_day_gain_filter(self, ohlcv_df, timeframe: str = "1d") -> HardFilterResult:
+    def _check_prev_day_gain_filter(self, ohlcv_df, timeframe: str = "1d", pure_technical: bool = False) -> HardFilterResult:
         """
-        Filter tolak saham yang sudah naik > 15% pada hari perdagangan sebelumnya.
-        Saham yang sudah melonjak terlalu tinggi (>15%) kemarin rawan aksi profit taking,
-        climax run, atau suspensi bursa.
+        Filter tolak saham yang sudah naik melebihi batas pada hari perdagangan sebelumnya:
+        - Daily (pagi hari): maks +20%
+        - Intraday (siang): maks +15%
         """
         if settings.DATA_PROVIDER == "mock" or ohlcv_df is None or len(ohlcv_df) < 2:
             return HardFilterResult(passed=True)
+
+        max_gain = (
+            self.MAX_PREV_DAY_GAIN_PCT_INTRADAY
+            if self._is_intraday(timeframe, pure_technical=pure_technical)
+            else self.MAX_PREV_DAY_GAIN_PCT
+        )
 
         try:
             prev_gain = 0.0
@@ -653,22 +668,23 @@ class ScoringEngine:
                     if c_prev > 0:
                         prev_gain = ((c_last - c_prev) / c_prev) * 100.0
 
-            if prev_gain > self.MAX_PREV_DAY_GAIN_PCT:
+            if prev_gain > max_gain:
                 return HardFilterResult(
                     passed=False,
                     category="prev_day_surge",
-                    reason=f"Saham naik > 15% di hari sebelumnya (+{prev_gain:.1f}%) — risiko profit taking / climax"
+                    reason=f"Saham naik > {max_gain:.0f}% di hari sebelumnya (+{prev_gain:.1f}%) — risiko profit taking / climax"
                 )
         except Exception as e:
             logger.warning(f"[HardFilter] Gagal mengecek prev_day_gain: {e}")
 
         return HardFilterResult(passed=True)
 
-    def _check_adx_filter(self, technical: Dict, data_len: int) -> HardFilterResult:
+    def _check_adx_filter(self, technical: Dict, data_len: int, timeframe: str = "1d", pure_technical: bool = False) -> HardFilterResult:
         """
-        Masalah 1 & 2: ADX Hard Filter sadar warm-up period.
+        ADX Hard Filter sadar warm-up period:
         - Jika data < 28 bar, ADX belum stabil → SKIP filter (jangan gugurkan).
-        - Jika data >= 28 bar, terapkan threshold ADX >= 15 (bukan 20).
+        - Daily (pagi hari): wajib ADX >= 12.
+        - Intraday (siang): dinilai via scoring engine (tidak menggugurkan).
         """
         if settings.DATA_PROVIDER == "mock":
             return HardFilterResult(passed=True)
@@ -678,65 +694,89 @@ class ScoringEngine:
             return HardFilterResult(passed=True, category="adx_warmup_skip",
                                     reason=f"ADX skip — data {data_len} bar belum cukup warm-up")
 
+        if self._is_intraday(timeframe, pure_technical=pure_technical):
+            return HardFilterResult(
+                passed=True,
+                category="adx_scoring_only",
+                reason="ADX intraday dinilai via scoring engine (tidak menggugurkan)",
+            )
+
         adx = technical.get("adx", 0) or 0
-        return HardFilterResult(
-            passed=True,
-            category="adx_scoring_only",
-            reason="ADX dinilai murni via scoring engine (tidak menggugurkan)",
-        )
+        if adx < self.ADX_HARD_FILTER_THRESHOLD:
+            return HardFilterResult(
+                passed=False,
+                category="adx",
+                reason=f"ADX terlalu rendah ({adx:.1f} < {self.ADX_HARD_FILTER_THRESHOLD}) — tren belum terbentuk",
+            )
+        return HardFilterResult(passed=True)
 
     def _check_liquidity_filter(self, technical: Dict, ohlcv_df, timeframe: str = "1d", pure_technical: bool = False) -> HardFilterResult:
         """
-        Volume DAN Value check dengan threshold adaptif:
-        - Intraday / Pure Technical (60m): volume min 100.000 lembar, value min Rp 1 Miliar
-        - Daily (1d): volume min 500.000 lembar (~5.000 lot), value min Rp 2 Miliar
+        Volume DAN Value check dengan threshold & window adaptif:
+        - Daily (1d / pagi hari): rata-rata 5 hari — volume min 200.000 lembar, value min Rp 1 Miliar
+        - Intraday (15m/60m / pure technical): rata-rata 20 bar — volume min 200.000 lembar, value min Rp 2 Miliar
         """
         if settings.DATA_PROVIDER == "mock":
             return HardFilterResult(passed=True)
 
-        is_intraday = (timeframe in ["15m", "60m", "1h", "60"]) or pure_technical
+        is_intraday = self._is_intraday(timeframe, pure_technical=pure_technical)
         min_vol = self.MIN_AVG_VOLUME_LOT_INTRADAY if is_intraday else self.MIN_AVG_VOLUME_LOT
         min_val = self.MIN_AVG_VALUE_IDR_INTRADAY if is_intraday else self.MIN_AVG_VALUE_IDR
+        window = self.INTRADAY_LIQUIDITY_WINDOW_BARS if is_intraday else self.DAILY_LIQUIDITY_WINDOW_DAYS
+        unit_label = "bar" if is_intraday else "hari"
 
-        vol_avg_20 = technical.get("volume_avg_20", 0) or 0
-        volume_passed = vol_avg_20 >= min_vol
+        if is_intraday:
+            vol_avg = technical.get("volume_avg_20", 0) or 0
+        else:
+            if "volume_avg_5" in technical and technical["volume_avg_5"] is not None:
+                vol_avg = technical["volume_avg_5"] or 0
+            elif ohlcv_df is not None and len(ohlcv_df) > 0 and "volume" in ohlcv_df.columns and "volume_avg_20" not in technical:
+                vol_avg = float(ohlcv_df["volume"].tail(window).mean())
+            else:
+                vol_avg = technical.get("volume_avg_20", 0) or 0
+        volume_passed = vol_avg >= min_vol
 
         value_passed = True  # default jika kolom tidak tersedia
+        avg_value_display = 0.0
         if ohlcv_df is not None and len(ohlcv_df) > 0 and "value" in ohlcv_df.columns:
-            avg_value = ohlcv_df["value"].tail(20).mean()
-            value_passed = avg_value >= min_val
+            avg_value_display = float(ohlcv_df["value"].tail(window).mean())
+            value_passed = avg_value_display >= min_val
 
         if not volume_passed and not value_passed:
             return HardFilterResult(
                 passed=False, category="volume_and_value",
                 reason=(
-                    f"Gagal volume ({vol_avg_20:,.0f} < {min_vol:,.0f}) "
-                    f"DAN value (< Rp{min_val/1e9:.1f}M)"
+                    f"Gagal volume avg {window} {unit_label} ({vol_avg:,.0f} < {min_vol:,.0f}) "
+                    f"DAN value (Rp{avg_value_display/1e9:.2f}M < Rp{min_val/1e9:.1f}M)"
                 )
             )
         if not volume_passed:
             return HardFilterResult(
                 passed=False, category="volume",
-                reason=f"Volume avg 20 bar terlalu rendah ({vol_avg_20:,.0f}) — minimum {min_vol:,.0f}"
+                reason=f"Volume avg {window} {unit_label} terlalu rendah ({vol_avg:,.0f}) — minimum {min_vol:,.0f}"
             )
         if not value_passed:
-            avg_value_display = ohlcv_df["value"].tail(20).mean() if (ohlcv_df is not None and "value" in ohlcv_df.columns) else 0
             return HardFilterResult(
                 passed=False, category="value",
-                reason=f"Nilai transaksi rata-rata 20 bar terlalu rendah (Rp{avg_value_display/1e9:.2f}M) — minimum Rp{min_val/1e9:.1f}M"
+                reason=f"Nilai transaksi rata-rata {window} {unit_label} terlalu rendah (Rp{avg_value_display/1e9:.2f}M) — minimum Rp{min_val/1e9:.1f}M"
             )
         return HardFilterResult(passed=True)
 
-    def _check_atr_filter(self, technical: Dict) -> HardFilterResult:
-        """ATR filter: tolak saham yang terlalu volatile (> 7% per bar/hari)."""
+    def _check_atr_filter(self, technical: Dict, timeframe: str = "1d", pure_technical: bool = False) -> HardFilterResult:
+        """ATR filter: tolak saham yang terlalu volatile (> 10% untuk daily, > 7% untuk intraday)."""
         if settings.DATA_PROVIDER == "mock":
             return HardFilterResult(passed=True)
 
+        max_atr = (
+            self.MAX_ATR_PCT_INTRADAY
+            if self._is_intraday(timeframe, pure_technical=pure_technical)
+            else self.MAX_ATR_PCT
+        )
         atr_pct = technical.get("atr_percent", 0) or 0
-        if atr_pct > self.MAX_ATR_PCT:
+        if atr_pct > max_atr:
             return HardFilterResult(
                 passed=False, category="atr",
-                reason=f"ATR terlalu tinggi ({atr_pct:.1f}%) — risiko terlalu besar, R:R buruk"
+                reason=f"ATR terlalu tinggi ({atr_pct:.1f}% > {max_atr:.1f}%) — risiko terlalu besar, R:R buruk"
             )
         return HardFilterResult(passed=True)
 
@@ -744,15 +784,14 @@ class ScoringEngine:
         """
         Orkestrasi semua Hard Filter secara berurutan.
         Mengembalikan HardFilterResult pertama yang gagal, atau passed=True jika semua lolos.
-        Urutan: ADX → Liquidity (Volume+Value) → ATR
         """
         for check_fn in [
             lambda: self._check_min_price_filter(ohlcv_df, timeframe=timeframe),
-            lambda: self._check_prev_day_gain_filter(ohlcv_df, timeframe=timeframe),
+            lambda: self._check_prev_day_gain_filter(ohlcv_df, timeframe=timeframe, pure_technical=pure_technical),
             lambda: self._check_ara_filter(ohlcv_df, timeframe=timeframe),
-            lambda: self._check_adx_filter(technical, data_len),
+            lambda: self._check_adx_filter(technical, data_len, timeframe=timeframe, pure_technical=pure_technical),
             lambda: self._check_liquidity_filter(technical, ohlcv_df, timeframe=timeframe, pure_technical=pure_technical),
-            lambda: self._check_atr_filter(technical),
+            lambda: self._check_atr_filter(technical, timeframe=timeframe, pure_technical=pure_technical),
         ]:
             result = check_fn()
             if not result.passed:

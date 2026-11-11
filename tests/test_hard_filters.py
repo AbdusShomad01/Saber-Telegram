@@ -15,11 +15,12 @@ from services.scoring_engine import ScoringEngine, HardFilterResult, FilterFunne
 #  Helper factories
 # ─────────────────────────────────────────────
 
-def make_technical(adx=25.0, atr_percent=2.0, volume_avg_20=10_000_000):
+def make_technical(adx=25.0, atr_percent=2.0, volume_avg_20=10_000_000, volume_avg_5=None):
     return {
         "adx": adx,
         "atr_percent": atr_percent,
         "volume_avg_20": volume_avg_20,
+        "volume_avg_5": volume_avg_20 if volume_avg_5 is None else volume_avg_5,
         "_data_length": 60,
     }
 
@@ -64,8 +65,14 @@ class TestADXWarmUp:
         assert result.category == "adx_warmup_skip"
 
     def test_adx_filter_active_at_28_bar(self, engine):
-        """28 bar ke atas: ADX rendah tetap lolos Hard Filter (dinilai di scoring engine)."""
-        result = engine._check_adx_filter(make_technical(adx=5.0), data_len=28)
+        """28 bar ke atas di daily: ADX < 12 gugur dengan category 'adx'."""
+        result = engine._check_adx_filter(make_technical(adx=5.0), data_len=28, timeframe="1d")
+        assert result.passed is False
+        assert result.category == "adx"
+
+    def test_adx_intraday_stays_scoring_only(self, engine):
+        """Mode intraday (15m / pure_technical): ADX rendah tidak menggugurkan hard filter."""
+        result = engine._check_adx_filter(make_technical(adx=5.0), data_len=28, timeframe="15m", pure_technical=True)
         assert result.passed is True
         assert result.category == "adx_scoring_only"
 
@@ -76,37 +83,47 @@ class TestADXWarmUp:
 
 
 # ─────────────────────────────────────────────
-#  MASALAH 2: Threshold ADX dari 20 ke 15
+#  MASALAH 2: Threshold ADX Minimum Daily = 12
 # ─────────────────────────────────────────────
 
 class TestADXThreshold:
-    """Zona ADX 15-20 ('early_trend') harus lolos hard filter."""
+    """Batas minimum ADX hard filter daily (pagi hari) adalah 12."""
+
+    def test_adx_below_12_fails_daily(self, engine):
+        """ADX 11.9 (< 12) di daily harus gugur dengan category 'adx'."""
+        result = engine._check_adx_filter(make_technical(adx=11.9), data_len=60, timeframe="1d")
+        assert result.passed is False
+        assert result.category == "adx"
+
+    def test_adx_12_passes_daily(self, engine):
+        """ADX tepat 12 harus lolos hard filter daily."""
+        result = engine._check_adx_filter(make_technical(adx=12.0), data_len=60, timeframe="1d")
+        assert result.passed is True
 
     def test_adx_14_passes_filter_scores_zero(self, engine):
-        """ADX 14 (di bawah 15) tetap lolos Hard Filter, dinilai 0 poin di scoring."""
-        result = engine._check_adx_filter(make_technical(adx=14.9), data_len=60)
+        """ADX 14.9 (>= 12) lolos Hard Filter daily, namun dinilai 0 poin di scoring."""
+        result = engine._check_adx_filter(make_technical(adx=14.9), data_len=60, timeframe="1d")
         assert result.passed is True
-        assert result.category == "adx_scoring_only"
         assert engine.score_adx(14.9, 60)["score"] == 0
 
     def test_adx_15_lolos(self, engine):
-        """ADX tepat 15 harus lolos (batas bawah baru)."""
+        """ADX tepat 15 harus lolos."""
         result = engine._check_adx_filter(make_technical(adx=15.0), data_len=60)
         assert result.passed is True
 
     def test_adx_18_lolos(self, engine):
-        """ADX 18 (early_trend) harus lolos hard filter, dinilai di scoring engine."""
+        """ADX 18 harus lolos hard filter, dinilai di scoring engine."""
         result = engine._check_adx_filter(make_technical(adx=18.0), data_len=60)
         assert result.passed is True
 
     def test_adx_19_lolos(self, engine):
-        """ADX 19.9 yang dulu gugur di threshold 20 sekarang harus lolos."""
+        """ADX 19.9 harus lolos."""
         result = engine._check_adx_filter(make_technical(adx=19.9), data_len=60)
         assert result.passed is True
 
-    def test_adx_class_constant_is_15(self, engine):
-        """Pastikan konstanta threshold tidak berubah tanpa sengaja."""
-        assert engine.ADX_HARD_FILTER_THRESHOLD == 15
+    def test_adx_class_constant_is_12(self, engine):
+        """Pastikan konstanta threshold ADX daily adalah 12."""
+        assert engine.ADX_HARD_FILTER_THRESHOLD == 12
 
 
 # ─────────────────────────────────────────────
@@ -167,58 +184,74 @@ class TestFilterFunnelStats:
 # ─────────────────────────────────────────────
 
 class TestLiquidityFilter:
-    """Volume dan Value harus dicheck KEDUANYA secara independent (AND)."""
+    """Volume dan Value harus dicheck KEDUANYA secara independent (AND), rata-rata 5 hari untuk daily."""
 
     def test_lolos_jika_keduanya_cukup(self, engine):
-        tech = make_technical(volume_avg_20=10_000_000)
-        ohlcv = make_ohlcv_df(avg_value=50_000_000_000)
-        result = engine._check_liquidity_filter(tech, ohlcv)
+        tech = make_technical(volume_avg_5=250_000, volume_avg_20=100_000)
+        ohlcv = make_ohlcv_df(avg_value=1_500_000_000)
+        result = engine._check_liquidity_filter(tech, ohlcv, timeframe="1d")
         assert result.passed is True
 
+    def test_daily_uses_5d_avg_not_20d_avg(self, engine):
+        """Daily wajib pakai rata-rata 5 hari (volume_avg_5 & 5 hari terakhir value), bukan 20 hari."""
+        # 15 hari awal sepi (Rp 200jt), 5 hari terakhir ramai (Rp 2M); volume_avg_20 rendah, volume_avg_5 >= 200k
+        tech = make_technical(volume_avg_20=80_000, volume_avg_5=250_000)
+        ohlcv = make_ohlcv_df(rows=20, avg_value=200_000_000)
+        ohlcv.iloc[-5:, ohlcv.columns.get_loc("value")] = 2_000_000_000
+        assert engine._check_liquidity_filter(tech, ohlcv, timeframe="1d").passed is True
+
+        # Kebalikannya: 15 hari awal ramai, 5 hari terakhir sepi -> harus gugur
+        tech_drop = make_technical(volume_avg_20=5_000_000, volume_avg_5=150_000)
+        ohlcv_drop = make_ohlcv_df(rows=20, avg_value=50_000_000_000)
+        ohlcv_drop.iloc[-5:, ohlcv_drop.columns.get_loc("value")] = 500_000_000
+        r_drop = engine._check_liquidity_filter(tech_drop, ohlcv_drop, timeframe="1d")
+        assert r_drop.passed is False
+        assert r_drop.category == "volume_and_value"
+
     def test_gugur_jika_volume_kurang(self, engine):
-        """Volume < 500 ribu lembar (5.000 lot) → gugur dengan category 'volume'."""
-        tech = make_technical(volume_avg_20=200_000)  # < 500 ribu
-        ohlcv = make_ohlcv_df(avg_value=50_000_000_000)  # value OK
-        result = engine._check_liquidity_filter(tech, ohlcv)
+        """Volume 5H < 200 ribu lembar → gugur dengan category 'volume'."""
+        tech = make_technical(volume_avg_5=199_999)  # < 200 ribu
+        ohlcv = make_ohlcv_df(avg_value=5_000_000_000)  # value OK
+        result = engine._check_liquidity_filter(tech, ohlcv, timeframe="1d")
         assert result.passed is False
         assert result.category == "volume"
 
     def test_gugur_jika_value_kurang(self, engine):
-        """Value < Rp2 miliar → gugur dengan category 'value'."""
-        tech = make_technical(volume_avg_20=10_000_000)  # volume OK
-        ohlcv = make_ohlcv_df(avg_value=1_000_000_000)   # < 2 miliar
-        result = engine._check_liquidity_filter(tech, ohlcv)
+        """Value 5H < Rp1 miliar → gugur dengan category 'value'."""
+        tech = make_technical(volume_avg_5=1_000_000)  # volume OK
+        ohlcv = make_ohlcv_df(avg_value=900_000_000)   # < 1 miliar
+        result = engine._check_liquidity_filter(tech, ohlcv, timeframe="1d")
         assert result.passed is False
         assert result.category == "value"
 
     def test_gugur_jika_keduanya_kurang(self, engine):
         """Keduanya gagal → category 'volume_and_value'."""
-        tech = make_technical(volume_avg_20=200_000)   # < 500 ribu
-        ohlcv = make_ohlcv_df(avg_value=1_000_000_000)  # < 2 miliar
-        result = engine._check_liquidity_filter(tech, ohlcv)
+        tech = make_technical(volume_avg_5=150_000)   # < 200 ribu
+        ohlcv = make_ohlcv_df(avg_value=800_000_000)  # < 1 miliar
+        result = engine._check_liquidity_filter(tech, ohlcv, timeframe="1d")
         assert result.passed is False
         assert result.category == "volume_and_value"
 
     def test_lolos_tanpa_kolom_value(self, engine):
         """Jika kolom 'value' tidak ada di DataFrame, value filter dilewati (default lolos)."""
-        tech = make_technical(volume_avg_20=10_000_000)
+        tech = make_technical(volume_avg_5=10_000_000)
         ohlcv = make_ohlcv_df().drop(columns=["value"])
         result = engine._check_liquidity_filter(tech, ohlcv)
         assert result.passed is True
 
     def test_lolos_tanpa_ohlcv(self, engine):
         """Tanpa ohlcv_df sama sekali, value filter default lolos."""
-        tech = make_technical(volume_avg_20=10_000_000)
+        tech = make_technical(volume_avg_5=10_000_000)
         result = engine._check_liquidity_filter(tech, None)
         assert result.passed is True
 
     def test_volume_threshold_constant(self, engine):
-        """Pastikan threshold volume tidak berubah tanpa sengaja."""
-        assert engine.MIN_AVG_VOLUME_LOT == 500_000
+        """Pastikan threshold volume daily adalah 200.000 lembar."""
+        assert engine.MIN_AVG_VOLUME_LOT == 200_000
 
     def test_value_threshold_constant(self, engine):
-        """Pastikan threshold value tidak berubah tanpa sengaja."""
-        assert engine.MIN_AVG_VALUE_IDR == 2_000_000_000
+        """Pastikan threshold value daily adalah Rp 1 miliar."""
+        assert engine.MIN_AVG_VALUE_IDR == 1_000_000_000
 
 
 # ─────────────────────────────────────────────
@@ -229,11 +262,16 @@ class TestATRFilter:
     def test_atr_normal_lolos(self, engine):
         assert engine._check_atr_filter(make_technical(atr_percent=3.0)).passed is True
 
-    def test_atr_7_masih_lolos(self, engine):
-        assert engine._check_atr_filter(make_technical(atr_percent=7.0)).passed is True
+    def test_atr_10_masih_lolos_daily(self, engine):
+        assert engine._check_atr_filter(make_technical(atr_percent=10.0), timeframe="1d").passed is True
 
-    def test_atr_above_7_gugur(self, engine):
-        r = engine._check_atr_filter(make_technical(atr_percent=7.1))
+    def test_atr_above_10_gugur_daily(self, engine):
+        r = engine._check_atr_filter(make_technical(atr_percent=10.1), timeframe="1d")
+        assert r.passed is False
+        assert r.category == "atr"
+
+    def test_atr_above_7_gugur_intraday(self, engine):
+        r = engine._check_atr_filter(make_technical(atr_percent=7.1), timeframe="15m")
         assert r.passed is False
         assert r.category == "atr"
 
@@ -273,40 +311,40 @@ class TestMinPriceFilter:
 
 
 # ─────────────────────────────────────────────
-#  MASALAH 6: Filter Saham Naik > 15% Kemarin
+#  MASALAH 6: Filter Saham Naik > 20% Kemarin (Daily)
 # ─────────────────────────────────────────────
 
 class TestPrevDayGainFilter:
-    """Saham yang naik > 15% pada hari perdagangan sebelumnya harus digugurkan."""
+    """Daily: saham yang naik > 20% kemarin digugurkan. Intraday: > 15%."""
 
-    def test_prev_gain_below_15_passes(self, engine):
-        """Kenaikan 10% kemarin harus lolos."""
-        ohlcv = pd.DataFrame({
-            "close": [1000.0, 1100.0],
-        })
-        r = engine._check_prev_day_gain_filter(ohlcv, timeframe="1d")
-        assert r.passed is True
-
-    def test_prev_gain_exactly_15_passes(self, engine):
-        """Kenaikan tepat 15% kemarin harus lolos (batas atas)."""
-        ohlcv = pd.DataFrame({
-            "close": [1000.0, 1150.0],
-        })
-        r = engine._check_prev_day_gain_filter(ohlcv, timeframe="1d")
-        assert r.passed is True
-
-    def test_prev_gain_above_15_fails(self, engine):
-        """Kenaikan 16% (ARA/climax) kemarin harus gugur."""
+    def test_prev_gain_below_20_passes(self, engine):
+        """Kenaikan 16% kemarin pada daily harus lolos."""
         ohlcv = pd.DataFrame({
             "close": [1000.0, 1160.0],
         })
         r = engine._check_prev_day_gain_filter(ohlcv, timeframe="1d")
+        assert r.passed is True
+
+    def test_prev_gain_exactly_20_passes(self, engine):
+        """Kenaikan tepat 20% kemarin pada daily harus lolos (batas atas)."""
+        ohlcv = pd.DataFrame({
+            "close": [1000.0, 1200.0],
+        })
+        r = engine._check_prev_day_gain_filter(ohlcv, timeframe="1d")
+        assert r.passed is True
+
+    def test_prev_gain_above_20_fails(self, engine):
+        """Kenaikan 21% kemarin pada daily harus gugur."""
+        ohlcv = pd.DataFrame({
+            "close": [1000.0, 1210.0],
+        })
+        r = engine._check_prev_day_gain_filter(ohlcv, timeframe="1d")
         assert r.passed is False
         assert r.category == "prev_day_surge"
-        assert "15%" in r.reason
+        assert "20%" in r.reason
 
     def test_prev_gain_intraday_grouped_by_date(self, engine):
-        """Intraday 60m: harus mengecek return hari kemarin vs lusa kemarin."""
+        """Intraday 60m: harus mengecek return hari kemarin vs lusa kemarin (batas 15%)."""
         dates = (
             [pd.Timestamp("2026-10-20 10:00:00")] * 4 +
             [pd.Timestamp("2026-10-21 10:00:00")] * 4 +
@@ -325,24 +363,25 @@ class TestPrevDayGainFilter:
 
 class TestRunHardFilters:
     def test_all_pass(self, engine):
-        tech = make_technical(adx=25.0, atr_percent=3.0, volume_avg_20=10_000_000)
+        tech = make_technical(adx=12.0, atr_percent=10.0, volume_avg_5=200_000)
         tech["_data_length"] = 60
-        ohlcv = make_ohlcv_df(avg_value=50_000_000_000)
-        r = engine._run_hard_filters(tech, ohlcv, data_len=60)
+        ohlcv = make_ohlcv_df(avg_value=1_000_000_000)
+        r = engine._run_hard_filters(tech, ohlcv, data_len=60, timeframe="1d")
         assert r.passed is True
 
-    def test_adx_low_does_not_fail_hard_filters(self, engine):
-        """ADX rendah (5.0) tidak lagi menggugurkan saham jika liquidity & ATR terpenuhi."""
-        tech = make_technical(adx=5.0, atr_percent=3.0, volume_avg_20=10_000_000)
+    def test_adx_below_12_fails_daily(self, engine):
+        """ADX < 12 menggugurkan saham di scan pagi daily jika data >= 28 bar."""
+        tech = make_technical(adx=11.0, atr_percent=3.0, volume_avg_5=10_000_000)
         ohlcv = make_ohlcv_df(avg_value=50_000_000_000)
-        r = engine._run_hard_filters(tech, ohlcv, data_len=60)
-        assert r.passed is True
+        r = engine._run_hard_filters(tech, ohlcv, data_len=60, timeframe="1d")
+        assert r.passed is False
+        assert r.category == "adx"
 
     def test_warmup_skip_then_check_volume(self, engine):
         """Saat warm-up, ADX di-skip. Jika volume kurang, volume yang gugur."""
-        tech = make_technical(adx=0.0, atr_percent=3.0, volume_avg_20=100_000)
+        tech = make_technical(adx=0.0, atr_percent=3.0, volume_avg_5=100_000)
         ohlcv = make_ohlcv_df(avg_value=50_000_000_000)
-        r = engine._run_hard_filters(tech, ohlcv, data_len=20)  # < 28 → skip ADX
+        r = engine._run_hard_filters(tech, ohlcv, data_len=20, timeframe="1d")  # < 28 → skip ADX
         assert r.passed is False
         assert r.category == "volume"
 
