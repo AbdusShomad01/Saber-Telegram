@@ -295,6 +295,33 @@ def test_rsi_four_new_rules():
     print("  [OK] 4 aturan baru logika RSI (Super Momentum, Overbought Reversal, Falling Knife, Bullish Rebound) passed")
 
 
+def test_sector_correlation_handles_trailing_nan_ihsg():
+    """Bar ^JKSE dengan Close=NaN di ujung tidak boleh mematahkan SectorCorrelation."""
+    stock_df = make_ohlcv(10, base_price=1000, trend="up")
+    ihsg_df = make_ohlcv(10, base_price=7000, trend="down")
+    ihsg_df.loc[ihsg_df.index[-1], "close"] = float("nan")
+
+    result = SectorCorrelationEngine(stock_df, ihsg_df).analyze()
+    assert result["ihsg_available"] is True
+    assert result["sector_score"] == 4
+    assert result["corr_signal"] == "outperform"
+
+
+def test_vwap_equal_close_no_false_bearish_penalty():
+    """Saat close == (H+L+C)/3 (VWAP harian), tidak boleh kena penalti -2 Price < VWAP."""
+    from services.technical_engine import TechnicalEngine
+
+    df = make_ohlcv(35, base_price=5200, trend="up")
+    df.loc[df.index[-1], ["open", "high", "low", "close"]] = [5350.0, 5350.0, 5150.0, 5250.0]
+
+    tech = TechnicalEngine(df).compute_all()
+    assert tech["price_above_vwap"] is False
+    assert tech["price_below_vwap"] is False
+
+    rules = ScoringEngine()._score_trend_momentum(tech)
+    assert not any(r.name == "Price < VWAP" for r in rules)
+
+
 if __name__ == "__main__":
     tests = [
         test_weights_sum_free,

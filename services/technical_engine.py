@@ -35,6 +35,9 @@ class TechnicalEngine:
         for col in required:
             if col not in self.df.columns:
                 raise ValueError(f"Missing required column: {col}")
+        self.df = self.df.dropna(subset=["close"]).reset_index(drop=True)
+        if self.ihsg_df is not None and "close" in self.ihsg_df.columns:
+            self.ihsg_df = self.ihsg_df.dropna(subset=["close"]).reset_index(drop=True)
         if len(self.df) < 30:
             logger.warning(f"Only {len(self.df)} rows — some indicators may be unreliable")
 
@@ -484,12 +487,13 @@ class TechnicalEngine:
         vwap = cum_tp_vol / cum_vol.replace(0, np.nan)
         vwap = vwap.fillna(tp)
         
-        current_vwap = vwap.iloc[-1]
-        current_price = df["close"].iloc[-1]
+        current_vwap = float(vwap.iloc[-1])
+        current_price = float(df["close"].iloc[-1])
         
         return {
             "vwap": round(current_vwap, 2),
             "price_above_vwap": bool(current_price > current_vwap),
+            "price_below_vwap": bool(current_price < current_vwap - 1e-6),
             "vwap_slope": round(vwap.iloc[-1] - vwap.iloc[-2], 2) if len(vwap) > 1 else 0.0
         }
 
@@ -582,11 +586,11 @@ class TechnicalEngine:
             try:
                 s_df = self.df[["date", "close"]].copy()
                 s_df["date"] = pd.to_datetime(s_df["date"]).dt.date
-                s_df["s_ret"] = s_df["close"].pct_change()
+                s_df["s_ret"] = s_df["close"].pct_change(fill_method=None)
 
                 i_df = self.ihsg_df[["date", "close"]].copy()
                 i_df["date"] = pd.to_datetime(i_df["date"]).dt.date
-                i_df["i_ret"] = i_df["close"].pct_change()
+                i_df["i_ret"] = i_df["close"].pct_change(fill_method=None)
 
                 merged = pd.merge(s_df, i_df, on="date").dropna()
                 if len(merged) >= 10 and merged["i_ret"].var() > 0:

@@ -1078,7 +1078,7 @@ class ScoringEngine:
         if t.get("price_above_vwap") is True:
             rules.append(RuleResult("Price > VWAP", 3, 3, cat,
                                     "Harga di atas VWAP — bullish bias"))
-        elif t.get("price_above_vwap") is False:
+        elif t.get("price_below_vwap") is True or ("price_below_vwap" not in t and t.get("price_above_vwap") is False):
             rules.append(RuleResult("Price < VWAP", -2, 3, cat,
                                     "Harga di bawah VWAP — bearish bias"))
 

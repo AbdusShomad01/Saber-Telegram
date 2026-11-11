@@ -547,8 +547,33 @@ class TestSuspendedFilter:
 
         res = scanner._fetch_stock_data("ABCD", interval="1d", period_days=365, pure_technical=False)
         assert "error" in res
+        assert res.get("error_category") == "suspended"
         assert "suspen" in res["error"].lower()
         scanner.data_provider.get_broker_summary.assert_not_called()
+
+    def test_yfinance_fetch_drops_incomplete_nan_ohlc_rows(self):
+        """Bar tidak lengkap dari yfinance (mis. ^JKSE Close=NaN) harus dibuang."""
+        from services.data_provider_service import DataProviderService
+
+        dates = pd.to_datetime(["2026-11-09", "2026-11-10", "2026-11-11"])
+        yf_df = pd.DataFrame(
+            {
+                "Open": [5082.0, 5096.0, 5139.0],
+                "High": [5105.0, 5160.0, 5144.0],
+                "Low": [5027.0, 5075.0, 5086.0],
+                "Close": [5073.0, 5125.0, float("nan")],
+                "Volume": [195948100, 187265600, 0],
+            },
+            index=dates,
+        )
+
+        dp = DataProviderService(provider="yfinance")
+        with patch("time.sleep"), patch("yfinance.download", return_value=yf_df):
+            df = dp._fetch_yfinance("^JKSE", dates[0].date(), dates[-1].date(), interval="1d")
+
+        assert len(df) == 2
+        assert str(df["date"].iloc[-1]) == "2026-11-10"
+        assert pd.notna(df["close"].iloc[-1])
 
 
 if __name__ == "__main__":

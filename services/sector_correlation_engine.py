@@ -8,6 +8,7 @@ Skor berkontribusi ke kategori 'sector_correlation' (4 poin).
 
 import logging
 from typing import Dict, Any, Optional
+import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -44,42 +45,55 @@ class SectorCorrelationEngine:
             "ihsg_available": False,
         }
 
-        if self.df.empty or len(self.df) < 6:
+        if self.df.empty or "close" not in self.df.columns:
+            return result
+
+        clean_df = self.df.dropna(subset=["close"]).copy()
+        if len(clean_df) < 6:
             return result
 
         try:
             # Stock 5-day return
-            stock_now   = float(self.df["close"].iloc[-1])
-            stock_5d    = float(self.df["close"].iloc[-6])
-            if stock_5d <= 0:
+            stock_now = float(clean_df["close"].iloc[-1])
+            stock_5d = float(clean_df["close"].iloc[-6])
+            if not np.isfinite(stock_now) or not np.isfinite(stock_5d) or stock_5d <= 0:
                 return result
 
             stock_ret = (stock_now / stock_5d - 1) * 100
+            if not np.isfinite(stock_ret):
+                return result
             result["stock_5d_return"] = round(stock_ret, 2)
 
-            # IHSG relative strength (if data available)
-            if self.ihsg_df is not None and len(self.ihsg_df) >= 6:
-                ihsg_now = float(self.ihsg_df["close"].iloc[-1])
-                ihsg_5d  = float(self.ihsg_df["close"].iloc[-6])
+            # IHSG relative strength (if valid non-NaN data available)
+            ihsg_clean = (
+                self.ihsg_df.dropna(subset=["close"]).copy()
+                if self.ihsg_df is not None and not self.ihsg_df.empty and "close" in self.ihsg_df.columns
+                else None
+            )
+            ihsg_valid = False
+            if ihsg_clean is not None and len(ihsg_clean) >= 6:
+                ihsg_now = float(ihsg_clean["close"].iloc[-1])
+                ihsg_5d = float(ihsg_clean["close"].iloc[-6])
 
-                if ihsg_5d > 0:
+                if np.isfinite(ihsg_now) and np.isfinite(ihsg_5d) and ihsg_5d > 0:
                     ihsg_ret = (ihsg_now / ihsg_5d - 1) * 100
                     rs = stock_ret - ihsg_ret
+                    if np.isfinite(ihsg_ret) and np.isfinite(rs):
+                        ihsg_valid = True
+                        result["ihsg_5d_return"] = round(ihsg_ret, 2)
+                        result["relative_strength"] = round(rs, 2)
+                        result["ihsg_available"] = True
 
-                    result["ihsg_5d_return"]   = round(ihsg_ret, 2)
-                    result["relative_strength"] = round(rs, 2)
-                    result["ihsg_available"]    = True
+                        if rs > 2.0:
+                            result.update({"corr_signal": "outperform", "sector_score": 4})
+                        elif rs > 0:
+                            result.update({"corr_signal": "inline_positive", "sector_score": 2})
+                        elif rs >= -2.0:
+                            result.update({"corr_signal": "inline_neutral", "sector_score": 0})
+                        else:
+                            result.update({"corr_signal": "underperform", "sector_score": 0})
 
-                    if rs > 2.0:
-                        result.update({"corr_signal": "outperform", "sector_score": 4})
-                    elif rs > 0:
-                        result.update({"corr_signal": "inline_positive", "sector_score": 2})
-                    elif rs >= -2.0:
-                        result.update({"corr_signal": "inline_neutral", "sector_score": 0})
-                    else:
-                        result.update({"corr_signal": "underperform", "sector_score": 0})
-
-            else:
+            if not ihsg_valid:
                 # Fallback: use absolute 5-day return as proxy
                 result["ihsg_available"] = False
                 if stock_ret > 3.0:

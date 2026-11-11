@@ -140,6 +140,14 @@ class DataProviderService:
             if hasattr(data.columns, "levels"):
                 data.columns = data.columns.get_level_values(0)
 
+            # Buang bar yang tidak lengkap (mis. ^JKSE kadang mengembalikan row terbaru dengan Close=NaN)
+            ohlc_cols = [c for c in ("Close", "Open", "High", "Low") if c in data.columns]
+            if ohlc_cols:
+                data = data.dropna(subset=ohlc_cols)
+            if data.empty:
+                logger.warning(f"No valid OHLC rows from yfinance for {ticker}")
+                return pd.DataFrame()
+
             # Date column should contain the full index (datetime) for intraday, or date for daily
             if interval in ["1m", "5m", "15m", "30m", "60m", "1h"]:
                 date_vals = data.index

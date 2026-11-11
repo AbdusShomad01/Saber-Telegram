@@ -84,6 +84,7 @@ class ScannerEngine:
         self.llm_engine = LLMEngine()
         self.regime_engine = RegimeEngine(self.data_provider)
         self._executor = ThreadPoolExecutor(max_workers=10)
+        self._phase1_suspended_count = 0
 
     # ------------------------------------------------------------------ #
     #  Multi-Timeframe: Fetch daily trend for cross-check
@@ -170,7 +171,7 @@ class ScannerEngine:
                 ohlcv, timeframe=interval, latest_market_date=latest_market_date
             )
             if not susp_res.passed:
-                return {"ticker": ticker, "error": susp_res.reason}
+                return {"ticker": ticker, "error": susp_res.reason, "error_category": "suspended"}
 
             # Get the last actual trading day
             last_date_val = ohlcv["date"].iloc[-1]
@@ -228,6 +229,7 @@ class ScannerEngine:
         tasks = [fetch_bounded(t) for t in tickers]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
+        self._phase1_suspended_count = 0
         valid_results = []
         for r in results:
             if isinstance(r, Exception):
@@ -235,6 +237,8 @@ class ScannerEngine:
             elif isinstance(r, dict) and "error" not in r:
                 valid_results.append(r)
             elif isinstance(r, dict) and "error" in r:
+                if r.get("error_category") == "suspended":
+                    self._phase1_suspended_count += 1
                 logger.warning(f"[{r.get('ticker')}] Skipped: {r.get('error')}")
 
         return valid_results
@@ -615,6 +619,11 @@ class ScannerEngine:
 
         # ── Log filter funnel summary ──
         funnel = self.scoring_engine.get_scan_stats()
+        phase1_susp = getattr(self, "_phase1_suspended_count", 0)
+        if phase1_susp > 0:
+            funnel.gugur_suspended += phase1_susp
+            funnel.failed_hard_filter += phase1_susp
+            funnel.total_stocks += phase1_susp
         logger.info(funnel.to_summary_text())
 
         # Sort by raw score descending

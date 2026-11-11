@@ -5,6 +5,7 @@ Analyzes the market regime based on the Jakarta Composite Index (IHSG).
 
 import logging
 from typing import Dict, Any, Optional, List
+import numpy as np
 import pandas as pd
 from services.data_provider_service import DataProviderService
 
@@ -17,15 +18,15 @@ def get_ihsg_regime(ihsg_close_prices: List[float]) -> str:
     - bearish: MA5 < MA20 dan change_20d_pct < -2%
     - sideways: kondisi selain di atas
     """
-    if len(ihsg_close_prices) < 20:
+    prices = pd.Series(ihsg_close_prices, dtype=float).replace([np.inf, -np.inf], np.nan).dropna()
+    if len(prices) < 20:
         return "sideways"
         
-    prices = pd.Series(ihsg_close_prices)
-    ma5 = prices.tail(5).mean()
-    ma20 = prices.tail(20).mean()
+    ma5 = float(prices.tail(5).mean())
+    ma20 = float(prices.tail(20).mean())
     
-    current_close = prices.iloc[-1]
-    close_20d_ago = prices.iloc[-20]
+    current_close = float(prices.iloc[-1])
+    close_20d_ago = float(prices.iloc[-20])
     
     if close_20d_ago > 0:
         change_20d_pct = ((current_close - close_20d_ago) / close_20d_ago) * 100
@@ -64,11 +65,16 @@ class RegimeEngine:
 
         try:
             df_ihsg = self.data_provider.get_ohlcv("^JKSE", period_days=30)
+            if not df_ihsg.empty and "close" in df_ihsg.columns:
+                df_ihsg = df_ihsg.dropna(subset=["close"]).reset_index(drop=True)
             if df_ihsg.empty or len(df_ihsg) < 20:
                 self._cached_regime = self._default_regime("Data IHSG tidak cukup (< 20 hari)")
                 return self._cached_regime
                 
-            close_prices = df_ihsg["close"].tolist()
+            close_prices = [float(x) for x in df_ihsg["close"].tolist() if pd.notna(x) and np.isfinite(x)]
+            if len(close_prices) < 20:
+                self._cached_regime = self._default_regime("Data IHSG valid tidak cukup (< 20 hari)")
+                return self._cached_regime
             regime_str = get_ihsg_regime(close_prices)
             
             last_close = float(close_prices[-1])

@@ -49,3 +49,24 @@ def test_regime_adjustment_clamp():
     assert apply_ihsg_regime_adjustment(105.0, "bullish") == 100.0
     assert apply_ihsg_regime_adjustment(-10.0, "bearish") == 0.0
     assert apply_ihsg_regime_adjustment(75.5, "bullish") == 75.5
+
+
+def test_ihsg_regime_ignores_trailing_nan():
+    import math
+    import pandas as pd
+    from unittest.mock import MagicMock
+    from services.regime_engine import RegimeEngine
+
+    prices = [5000.0 + i * 10.0 for i in range(21)] + [float("nan")]
+    assert get_ihsg_regime(prices) == "bullish"
+
+    dp = MagicMock()
+    dp.get_ohlcv.return_value = pd.DataFrame({
+        "date": pd.date_range("2026-10-01", periods=22, freq="B"),
+        "close": prices,
+    })
+    regime = RegimeEngine(dp).get_ihsg_regime()
+    assert regime["regime"] == "BULLISH"
+    assert math.isfinite(regime["last_price"])
+    assert math.isfinite(regime["ema_20"])
+    assert "nan" not in regime["description"].lower()
