@@ -1,134 +1,153 @@
 """
 Unit tests for BSJP (Beli Sore Jual Profit) Engine and DB.
-Tests all criteria:
-- EMA 9 > EMA 20 (20 pts, Hard Filter)
-- Price > VWAP & VWAP slope up (20 pts, Hard Filter: price > VWAP)
-- RSI 14 in [52, 68] (15 pts)
-- Volume Expansion >= 1.2x (15 pts)
-- CLV >= 0.75 (15 pts, Hard Filter)
-- Relative Strength vs IHSG (10 pts)
-- Candle 15M Bullish Quality (5 pts)
-Total = 100 pts.
+Tests all 5 Stockbit-style BSJP criteria:
+  1. Current Price Change >= +2%
+  2. Current Price Change <= +4%
+  3. Current Price >= 1 × Price MA 20
+  4. Volume (Shares) Today >= 1.2 × Volume (Shares) MA 20
+  5. Value (Today) >= Rp 10.000.000.000
 """
 
-import pytest
-import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
-from services.bsjp_engine import compute_bsjp_score
+import pandas as pd
+import pytest
+
 from services.bsjp_db import (
-    migrate_bsjp_table, save_bsjp_signals, get_pending_bsjp_signals, update_bsjp_outcome
+    get_pending_bsjp_signals,
+    migrate_bsjp_table,
+    save_bsjp_signals,
+    update_bsjp_outcome,
 )
+from services.bsjp_engine import evaluate_bsjp_stock, run_bsjp_screener
 
 
-def _make_dummy_data(
-    n_bars=40,
-    base_price=1000.0,
-    uptrend=True,
-    vol_expansion=True,
-    clv_high=True,
-    candle_bullish=True,
+def _make_daily_df(
+    n_bars=25,
+    prev_close=1000.0,
+    today_close=1030.0,
+    prev_volume=8_000_000.0,
+    today_volume=12_000_000.0,
+    base_history_close=1000.0,
 ):
-    """Buat data 5M dan 15M sintesis untuk testing."""
-    times_5m = [datetime(2026, 11, 7, 9, 0) + timedelta(minutes=5 * i) for i in range(n_bars)]
-    
-    closes = []
-    highs = []
-    lows = []
-    opens = []
-    volumes = []
-    
-    price = base_price
-    for i in range(n_bars):
-        if uptrend:
-            price += 2.0
-        else:
-            price -= 2.0
-        
-        o = price - 1.0
-        c = price
-        if clv_high:
-            # Close very close to high -> CLV >= 0.75
-            h = c + 0.5
-            l = o - 10.0
-        else:
-            # Close near low -> CLV < 0.75
-            h = c + 20.0
-            l = c - 1.0
-            
-        # Volume
-        if vol_expansion and i >= n_bars - 3:
-            v = 25000.0
-        else:
-            v = 10000.0
-            
-        opens.append(o)
-        highs.append(h)
-        lows.append(l)
-        closes.append(c)
-        volumes.append(v)
-        
-    df5 = pd.DataFrame({
-        "open": opens,
-        "high": highs,
-        "low": lows,
-        "close": closes,
-        "volume": volumes
-    }, index=pd.to_datetime(times_5m))
-    
-    # Buat df15
-    times_15m = [datetime(2026, 11, 7, 9, 0) + timedelta(minutes=15 * i) for i in range(n_bars // 3)]
-    c15 = closes[-1]
-    o15 = closes[-3] if candle_bullish else closes[-1] + 10.0
-    h15 = c15 + 0.5 if clv_high else c15 + 20.0
-    l15 = o15 - 5.0 if candle_bullish else c15 - 5.0
-    df15 = pd.DataFrame({
-        "open": [o15] * len(times_15m),
-        "high": [h15] * len(times_15m),
-        "low": [l15] * len(times_15m),
-        "close": [c15] * len(times_15m),
-        "volume": [40000.0] * len(times_15m),
-    }, index=pd.to_datetime(times_15m))
-    
-    return df5, df15
+    """Buat DataFrame harian (1d) sintesis untuk testing BSJP."""
+    dates = [datetime(2026, 10, 1) + timedelta(days=i) for i in range(n_bars)]
+    closes = [base_history_close] * (n_bars - 2) + [prev_close, today_close]
+    volumes = [prev_volume] * (n_bars - 1) + [today_volume]
+    return pd.DataFrame(
+        {"close": closes, "volume": volumes},
+        index=pd.to_datetime(dates),
+    )
 
 
-def test_bsjp_full_score_and_criteria():
-    """Test skenario ketika kriteria terpenuhi."""
-    df5, df15 = _make_dummy_data(uptrend=True, vol_expansion=True, clv_high=True, candle_bullish=True)
-    # Berikan IHSG return lebih rendah dari saham agar Relative Strength lolos
-    ihsg_ret = -0.01
-
-    res = compute_bsjp_score("BBCA", df5=df5, df15=df15, ihsg_ret=ihsg_ret)
+def test_bsjp_all_5_criteria_pass():
+    """Lolos semua 5 syarat: +3%, >= MA20, vol >= 1.2x MA20, value >= Rp10M."""
+    df = _make_daily_df(
+        prev_close=1000.0,
+        today_close=1030.0,     # +3.0% (antara 2% - 4%)
+        prev_volume=8_000_000.0,
+        today_volume=12_000_000.0,  # val = 1030 * 12M = Rp 12.36M; MA20 vol = 8.2M -> 1.46x
+    )
+    res = evaluate_bsjp_stock("BBCA", df=df)
+    assert res["passed"] is True
     assert res["hard_filter_pass"] is True
-    assert res["ema_ok"] is True
-    assert res["vwap_ok"] is True
-    assert res["clv_ok"] is True
-    assert res["rs_ok"] is True
-    assert res["candle_ok"] is True
-    assert res["volume_ok"] is True
-    assert res["score"] >= 80  # Lolosan kriteria kuat (layak / prioritas)
+    assert res["reason"] == "OK"
+    assert res["score"] >= 70.0
+    assert res["close_price"] == 1030.0
+    assert res["price_change_pct"] == 3.0
+    assert all(res["checks"].values())
 
 
-def test_bsjp_hard_filter_ema_fail():
-    """Jika EMA9 <= EMA20 (downtrend), hard filter gagal -> Skor 0."""
-    df5, df15 = _make_dummy_data(uptrend=False)
-    res = compute_bsjp_score("BBCA", df5=df5, df15=df15, ihsg_ret=0.0)
-    assert res["ema_ok"] is False
-    assert res["hard_filter_pass"] is False
-    assert res["score"] == 0
-    assert res["reason"] == "HARD_FILTER_FAILED"
+def test_bsjp_boundary_exact_2_and_4_percent():
+    """Batas tepat +2.0% dan +4.0% harus lolos."""
+    df_min = _make_daily_df(today_close=1020.0, today_volume=12_000_000.0)
+    res_min = evaluate_bsjp_stock("BBCA", df=df_min)
+    assert res_min["passed"] is True
+    assert res_min["checks"]["change_min_ok"] is True
+
+    df_max = _make_daily_df(today_close=1040.0, today_volume=12_000_000.0)
+    res_max = evaluate_bsjp_stock("BBCA", df=df_max)
+    assert res_max["passed"] is True
+    assert res_max["checks"]["change_max_ok"] is True
 
 
-def test_bsjp_hard_filter_clv_fail():
-    """Jika CLV < 0.75 (close di dekat low), hard filter gagal -> Skor 0."""
-    df5, df15 = _make_dummy_data(clv_high=False)
-    res = compute_bsjp_score("BBCA", df5=df5, df15=df15, ihsg_ret=0.0)
-    assert res["clv_ok"] is False
-    assert res["hard_filter_pass"] is False
-    assert res["score"] == 0
-    assert res["reason"] == "HARD_FILTER_FAILED"
+def test_bsjp_fails_change_below_2_or_above_4():
+    """Perubahan < 2% atau > 4% harus gugur."""
+    df_low = _make_daily_df(today_close=1019.0, today_volume=12_000_000.0)  # +1.9%
+    res_low = evaluate_bsjp_stock("BBCA", df=df_low)
+    assert res_low["passed"] is False
+    assert res_low["checks"]["change_min_ok"] is False
+    assert res_low["score"] == 0.0
+
+    df_high = _make_daily_df(today_close=1041.0, today_volume=12_000_000.0)  # +4.1%
+    res_high = evaluate_bsjp_stock("BBCA", df=df_high)
+    assert res_high["passed"] is False
+    assert res_high["checks"]["change_max_ok"] is False
+    assert res_high["score"] == 0.0
+
+
+def test_bsjp_fails_below_price_ma20():
+    """Harga saat ini di bawah Price MA 20 harus gugur."""
+    df = _make_daily_df(
+        base_history_close=1200.0,  # MA20 jadi tinggi (~1181)
+        prev_close=1000.0,
+        today_close=1030.0,         # +3%, tapi masih di bawah MA20
+        today_volume=12_000_000.0,
+    )
+    res = evaluate_bsjp_stock("BBCA", df=df)
+    assert res["passed"] is False
+    assert res["checks"]["above_ma20_ok"] is False
+    assert res["score"] == 0.0
+
+
+def test_bsjp_fails_volume_below_1_2x_ma20():
+    """Volume hari ini < 1.2 × Volume MA 20 harus gugur meski value >= Rp10M."""
+    df = _make_daily_df(
+        today_close=1030.0,
+        prev_volume=10_000_000.0,
+        today_volume=11_000_000.0,  # MA20=10.05M -> 1.2x=12.06M > 11M (val=11.33M OK)
+    )
+    res = evaluate_bsjp_stock("BBCA", df=df)
+    assert res["checks"]["value_ok"] is True
+    assert res["checks"]["volume_ma20_ok"] is False
+    assert res["passed"] is False
+    assert res["score"] == 0.0
+
+
+def test_bsjp_fails_value_below_10_billion():
+    """Value hari ini < Rp 10 miliar harus gugur meski volume >= 1.2 × MA 20."""
+    df = _make_daily_df(
+        today_close=1030.0,
+        prev_volume=1_000_000.0,
+        today_volume=5_000_000.0,   # Vol ratio ~4.17x MA20 OK, tapi val = Rp 5.15M < 10M
+    )
+    res = evaluate_bsjp_stock("BBCA", df=df)
+    assert res["checks"]["volume_ma20_ok"] is True
+    assert res["checks"]["value_ok"] is False
+    assert res["passed"] is False
+    assert res["score"] == 0.0
+
+
+def test_bsjp_fails_insufficient_daily_bars():
+    """Data harian < 20 bar (tidak cukup untuk MA20) harus return INSUFFICIENT_DAILY_DATA."""
+    df = _make_daily_df(n_bars=15)
+    res = evaluate_bsjp_stock("BBCA", df=df)
+    assert res["passed"] is False
+    assert res["reason"] == "INSUFFICIENT_DAILY_DATA"
+
+
+def test_run_bsjp_screener_filters_and_sorts():
+    """run_bsjp_screener hanya mengembalikan saham lolos dan terurut dari skor/value tertinggi."""
+    good_big = _make_daily_df(today_close=1030.0, prev_volume=10_000_000.0, today_volume=25_000_000.0)
+    good_small = _make_daily_df(today_close=1025.0, prev_volume=8_000_000.0, today_volume=11_000_000.0)
+    bad = _make_daily_df(today_close=1010.0, prev_volume=8_000_000.0, today_volume=12_000_000.0)  # +1%
+
+    mock_map = {"BMRI": good_small, "BBCA": good_big, "TLKM": bad}
+    with patch("services.bsjp_engine._fetch_daily", side_effect=lambda t: mock_map.get(t)):
+        signals = run_bsjp_screener(["TLKM", "BMRI", "BBCA"])
+
+    assert [s["ticker"] for s in signals] == ["BBCA", "BMRI"]
 
 
 def test_bsjp_db_operations(tmp_path, monkeypatch):
@@ -138,24 +157,20 @@ def test_bsjp_db_operations(tmp_path, monkeypatch):
 
     migrate_bsjp_table()
 
-    # Simpan signal hari ini
     signals = [
         {"ticker": "BBCA", "score": 95, "close_price": 3200},
         {"ticker": "BMRI", "score": 85, "close_price": 6500},
     ]
     save_bsjp_signals(signals, signal_date="2026-11-06")
 
-    # Pastikan tersimpan
     pending = get_pending_bsjp_signals("2026-11-06")
     assert len(pending) == 2
     assert pending[0]["ticker"] == "BBCA"
 
-    # Cek duplikasi: panggil save lagi dengan data yang sama tidak menambah row
     save_bsjp_signals(signals, signal_date="2026-11-06")
     pending2 = get_pending_bsjp_signals("2026-11-06")
     assert len(pending2) == 2
 
-    # Update outcome besok pagi
     update_bsjp_outcome(
         ticker="BBCA",
         signal_date="2026-11-06",
@@ -165,7 +180,6 @@ def test_bsjp_db_operations(tmp_path, monkeypatch):
         outcome="profit",
     )
 
-    # Setelah diupdate, BBCA sudah tidak pending lagi
     pending_after = get_pending_bsjp_signals("2026-11-06")
     assert len(pending_after) == 1
     assert pending_after[0]["ticker"] == "BMRI"

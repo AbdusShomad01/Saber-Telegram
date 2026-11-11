@@ -1,43 +1,41 @@
 """
 BSJP Engine — Beli Sore Jual Profit
 Screener yang berjalan pukul 15:45 WIB setiap hari bursa.
-Menggunakan data intraday hari yang sama (5M, 15M).
-Data diambil dari Yahoo Finance (yfinance).
+Menggunakan data harian (1d) terbaru dari Yahoo Finance (yfinance).
 
-Kriteria (dari spec user):
-  EMA 9 > EMA 20 (5M)         → 20 poin  [HARD FILTER]
-  Harga > VWAP & VWAP naik    → 20 poin  [HARD FILTER: harga > VWAP]
-  RSI 14 zona 52–68 (5M)      → 15 poin
-  Volume Expansion ≥1,2× (5M) → 15 poin
-  CLV ≥ 0,75 (intraday)       → 15 poin  [HARD FILTER]
-  Relative Strength vs IHSG   → 10 poin
-  Candle 15M bullish quality  →  5 poin
-  Total                       = 100 poin
-
-Klasifikasi:
-  90–100 : kandidat prioritas
-  80–89  : kandidat layak diuji
-  70–79  : observasi
-  <70    : tidak dipilih
-
-Syarat wajib: harga di atas VWAP, EMA 9 di atas EMA 20, dan CLV minimal 0,75.
+Kriteria Screening (wajib lolos semua — AND):
+  1. Current Price Change >= +2%
+  2. Current Price Change <= +4%
+  3. Current Price >= 1 × Price MA 20
+  4. Volume (Shares) Today >= 1.2 × Volume (Shares) MA 20
+  5. Value (Today) >= Rp 10.000.000.000 (10 Miliar)
 """
 
 import logging
+import threading
 import time
-from datetime import date, datetime
-from typing import Optional, List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Dict, List, Optional
+
 import pandas as pd
-import numpy as np
 
 logger = logging.getLogger(__name__)
+
+_YF_LOCK = threading.Lock()
+
+# Parameter Screener BSJP (sesuai spesifikasi Stockbit screener user)
+BSJP_MIN_PRICE_CHANGE_PCT = 2.0
+BSJP_MAX_PRICE_CHANGE_PCT = 4.0
+BSJP_PRICE_MA_PERIOD = 20
+BSJP_VOLUME_MA_PERIOD = 20
+BSJP_MIN_VOLUME_MA_MULTIPLIER = 1.2
+BSJP_MIN_VALUE_TODAY_IDR = 10_000_000_000  # Rp 10 Miliar
 
 # Monkeypatch yfinance User-Agent agar tidak terkena blokir / HTTP 429 Rate Limit
 try:
     import yfinance.data as yfd
     yfd.YfData.user_agent_headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 except Exception as e:
     logger.warning(f"Failed to monkeypatch yfinance User-Agent: {e}")
@@ -47,252 +45,154 @@ except Exception as e:
 # Internal helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _fetch_intraday(ticker: str, interval: str, target_date: Optional[str] = None) -> Optional[pd.DataFrame]:
+def _fetch_daily(ticker: str) -> Optional[pd.DataFrame]:
     """
-    Ambil data intraday dari yfinance, kembalikan hanya baris hari tertentu (WIB).
-    Kolom: open, high, low, close, volume (lowercase).
+    Ambil data harian 3 bulan dari yfinance untuk menghitung MA 20, perubahan harga,
+    volume hari ini, dan value hari ini.
     """
     try:
         import yfinance as yf
-        import pytz
 
         yf_ticker = ticker if ticker.endswith(".JK") else ticker + ".JK"
-        raw = yf.download(
-            yf_ticker,
-            period="1mo",
-            interval=interval,
-            auto_adjust=True,
-            progress=False,
-            threads=False,
-        )
+        with _YF_LOCK:
+            raw = yf.download(
+                yf_ticker,
+                period="3mo",
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+            )
         if raw is None or raw.empty:
             return None
 
-        # Flatten MultiIndex kolom (yfinance v0.2+)
         if isinstance(raw.columns, pd.MultiIndex):
             raw.columns = raw.columns.get_level_values(0)
-        raw.columns = [c.lower() for c in raw.columns]
+        raw.columns = [str(c).lower() for c in raw.columns]
 
-        # Pastikan index ber-timezone; konversi ke WIB
-        wib = pytz.timezone("Asia/Jakarta")
-        if raw.index.tzinfo is None:
-            raw.index = raw.index.tz_localize("UTC")
-        raw.index = raw.index.tz_convert(wib)
+        if "close" not in raw.columns or "volume" not in raw.columns:
+            return None
 
-        date_str = target_date or datetime.now(wib).strftime("%Y-%m-%d")
-        df = raw[raw.index.strftime("%Y-%m-%d") == date_str].copy()
+        cols = ["close", "volume"] + (["value"] if "value" in raw.columns else [])
+        df = raw[cols].copy()
+        for col in cols:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.dropna(subset=["close", "volume"])
+        df = df[df["close"] > 0]
         return df if not df.empty else None
     except Exception as e:
-        logger.warning(f"[BSJP] fetch_intraday {ticker} {interval}: {e}")
+        logger.warning(f"[BSJP] fetch_daily {ticker}: {e}")
         return None
 
 
-def _session_vwap(df: pd.DataFrame) -> pd.Series:
+def _compute_ranking_score(volume_ratio: float, value_today: float) -> float:
     """
-    Hitung cumulative session VWAP sejak candle pertama hari itu.
-    VWAP(t) = sum(TP × Vol) / sum(Vol)
+    Hitung skor ranking (70–100) untuk kandidat yang sudah lolos semua 5 kriteria.
+    Mengutamakan lonjakan volume terhadap MA20 dan besarnya likuiditas nilai transaksi.
     """
-    tp = (df["high"] + df["low"] + df["close"]) / 3.0
-    cum_tpv = (tp * df["volume"]).cumsum()
-    cum_vol = df["volume"].cumsum()
-    return cum_tpv / cum_vol.replace(0, np.nan)
-
-
-def _ema(series: pd.Series, period: int) -> pd.Series:
-    return series.ewm(span=period, adjust=False).mean()
-
-
-def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = (-delta).clip(lower=0)
-    avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
-    avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    # Handle pure uptrend (avg_loss = 0)
-    rsi = rsi.fillna(pd.Series(
-        np.where(avg_gain > 0, 100.0, 50.0), index=series.index
-    ))
-    return rsi
-
-
-def _ihsg_return_today() -> Optional[float]:
-    """Return IHSG hari ini (pct change dari close kemarin ke close/terakhir hari ini)."""
-    try:
-        import yfinance as yf
-        ihsg = yf.download("^JKSE", period="1mo", interval="1d",
-                           auto_adjust=True, progress=False, threads=False)
-        if ihsg is None or len(ihsg) < 2:
-            return None
-        if isinstance(ihsg.columns, pd.MultiIndex):
-            ihsg.columns = ihsg.columns.get_level_values(0)
-        ihsg.columns = [c.lower() for c in ihsg.columns]
-        closes = ihsg["close"].dropna()
-        if len(closes) < 2:
-            return None
-        return float((closes.iloc[-1] - closes.iloc[-2]) / closes.iloc[-2])
-    except Exception as e:
-        logger.warning(f"[BSJP] IHSG return: {e}")
-        return None
+    vol_bonus = min(max((volume_ratio - BSJP_MIN_VOLUME_MA_MULTIPLIER) * 10.0, 0.0), 15.0)
+    val_miliar = value_today / 1_000_000_000.0
+    val_bonus = min(max((val_miliar - 10.0) * 0.3, 0.0), 15.0)
+    return round(min(100.0, 70.0 + vol_bonus + val_bonus), 1)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────────────────────
 
-def compute_bsjp_score(
-    ticker: str,
-    target_date: Optional[str] = None,
-    df5: Optional[pd.DataFrame] = None,
-    df15: Optional[pd.DataFrame] = None,
-    ihsg_ret: Optional[float] = None,
-) -> dict:
+def evaluate_bsjp_stock(ticker: str, df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
     """
-    Hitung skor BSJP untuk satu saham pada hari ini / target_date.
-    Returns dict dengan keys:
-        score, ema_ok, vwap_ok, rsi_ok, volume_ok, clv_ok, rs_ok, candle_ok,
-        hard_filter_pass, close_price, reason
+    Evaluasi satu saham terhadap 5 syarat screener BSJP baru:
+      1. Current Price Change >= 2%
+      2. Current Price Change <= 4%
+      3. Current Price >= 1 × Price MA 20
+      4. Volume (Shares) Today >= 1.2 × Volume (Shares) MA 20
+      5. Value (Today) >= Rp 10.000.000.000
     """
-    result = {
+    result: Dict[str, Any] = {
         "ticker": ticker,
-        "score": 0,
-        "ema_ok": False,
-        "vwap_ok": False,
-        "rsi_ok": False,
-        "volume_ok": False,
-        "clv_ok": False,
-        "rs_ok": False,
-        "candle_ok": False,
+        "passed": False,
         "hard_filter_pass": False,
+        "score": 0.0,
         "close_price": None,
+        "prev_close": None,
+        "price_change_pct": None,
+        "price_ma20": None,
+        "volume_today": None,
+        "volume_ma20": None,
+        "volume_ratio": None,
+        "value_today": None,
+        "checks": {
+            "change_min_ok": False,
+            "change_max_ok": False,
+            "above_ma20_ok": False,
+            "volume_ma20_ok": False,
+            "value_ok": False,
+        },
         "reason": "",
     }
 
-    # ── 1. Ambil data 5M ────────────────────────────────────────────────────
-    if df5 is None:
-        df5 = _fetch_intraday(ticker, "5m", target_date)
-    if df5 is None or len(df5) < 10:
-        result["reason"] = "INSUFFICIENT_5M_DATA"
+    if df is None:
+        df = _fetch_daily(ticker)
+
+    min_bars = max(BSJP_PRICE_MA_PERIOD, BSJP_VOLUME_MA_PERIOD)
+    if df is None or len(df) < min_bars:
+        result["reason"] = "INSUFFICIENT_DAILY_DATA"
         return result
 
-    # ── 2. EMA 9 & EMA 20 (5M) — 20 poin [Syarat Wajib] ────────────────────
-    ema9 = _ema(df5["close"], 9)
-    ema20 = _ema(df5["close"], 20)
-    last_ema9 = float(ema9.iloc[-1])
-    last_ema20 = float(ema20.iloc[-1])
-    result["ema_ok"] = bool(last_ema9 > last_ema20)
-
-    # ── 3. VWAP Session kumulatif (5M) — 20 poin [Syarat Wajib Harga > VWAP] ─
-    vwap_series = _session_vwap(df5)
-    last_close_5m = float(df5["close"].iloc[-1])
-    last_vwap = float(vwap_series.iloc[-1]) if not vwap_series.empty else None
-    result["close_price"] = last_close_5m
-
-    if last_vwap is None or np.isnan(last_vwap):
-        result["reason"] = "VWAP_UNAVAILABLE"
+    df = df.copy()
+    df.columns = [str(c).lower() for c in df.columns]
+    if "close" not in df.columns or "volume" not in df.columns:
+        result["reason"] = "MISSING_REQUIRED_COLUMNS"
         return result
 
-    price_above_vwap = bool(last_close_5m > last_vwap)
-    # VWAP slope: VWAP candle terakhir > VWAP 3 candle sebelumnya
-    if len(vwap_series) >= 4:
-        vwap_prev3 = float(vwap_series.iloc[-4])
-        vwap_slope_up = bool(last_vwap > vwap_prev3)
-    else:
-        vwap_slope_up = False
-    result["vwap_ok"] = bool(price_above_vwap and vwap_slope_up)
-
-    # ── 4. RSI 14 zona 52–68 (5M) — 15 poin ────────────────────────────────
-    rsi_series = _rsi(df5["close"], 14)
-    last_rsi = float(rsi_series.iloc[-1])
-    result["rsi_ok"] = bool(52.0 <= last_rsi <= 68.0)
-
-    # ── 5. Volume Expansion (5M) — 15 poin ──────────────────────────────────
-    # Avg volume 3 candle terakhir ≥ 1,2× avg 6 candle sebelumnya
-    if len(df5) >= 9:
-        vol_last3 = float(df5["volume"].iloc[-3:].mean())
-        vol_prev6 = float(df5["volume"].iloc[-9:-3].mean())
-        result["volume_ok"] = bool((vol_prev6 > 0) and (vol_last3 >= 1.2 * vol_prev6))
-    else:
-        result["volume_ok"] = False
-
-    # ── 6. CLV Intraday — 15 poin [Syarat Wajib ≥ 0,75] ─────────────────────
-    # CLV = ((Close - Low) - (High - Close)) / (High - Low)
-    day_h = float(df5["high"].max())
-    day_l = float(df5["low"].min())
-    day_c = last_close_5m
-    if day_h > day_l:
-        clv_intraday = ((day_c - day_l) - (day_h - day_c)) / (day_h - day_l)
-    else:
-        clv_intraday = 0.0
-    result["clv_ok"] = bool(clv_intraday >= 0.75)
-
-    # ── 7. Relative Strength vs IHSG — 10 poin ───────────────────────────────
-    first_open = float(df5["open"].iloc[0])
-    stock_ret = (last_close_5m - first_open) / first_open if first_open > 0 else 0.0
-
-    if ihsg_ret is None:
-        ihsg_ret = _ihsg_return_today()
-
-    if ihsg_ret is not None:
-        result["rs_ok"] = bool(stock_ret > ihsg_ret)
-    else:
-        result["rs_ok"] = False
-
-    # ── 8. Candle 15M bullish berkualitas — 5 poin ───────────────────────────
-    if df15 is None:
-        df15 = _fetch_intraday(ticker, "15m", target_date)
-
-    if df15 is not None and len(df15) >= 1:
-        row15 = df15.iloc[-1]
-        h15 = float(row15["high"])
-        l15 = float(row15["low"])
-        c15 = float(row15["close"])
-        o15 = float(row15["open"])
-        candle_len = h15 - l15
-        if candle_len > 0:
-            # Bullish candle: Close > Open
-            is_bullish = bool(c15 > o15)
-            # Close dekat high: close ≥ low + 0.7×candle_length
-            close_near_high = bool(c15 >= (l15 + 0.7 * candle_len))
-            # Upper shadow ≤ 30% dari panjang candle
-            upper_shadow = h15 - max(c15, o15)
-            upper_shadow_ok = bool(upper_shadow <= (0.3 * candle_len))
-            result["candle_ok"] = bool(is_bullish and close_near_high and upper_shadow_ok)
-        else:
-            result["candle_ok"] = False
-    else:
-        result["candle_ok"] = False
-
-    # ── 9. Hard Filter [Syarat Wajib] ─────────────────────────────────────────
-    # Syarat wajib: harga di atas VWAP, EMA 9 di atas EMA 20, dan CLV minimal 0,75
-    result["hard_filter_pass"] = bool(
-        result["ema_ok"] and price_above_vwap and result["clv_ok"]
-    )
-
-    if not result["hard_filter_pass"]:
-        result["score"] = 0
-        result["reason"] = "HARD_FILTER_FAILED"
+    current_price = float(df["close"].iloc[-1])
+    prev_close = float(df["close"].iloc[-2])
+    if prev_close <= 0 or current_price <= 0:
+        result["reason"] = "INVALID_PRICE"
         return result
 
-    # ── 10. Hitung Total Skor (Total 100 poin) ────────────────────────────────
-    score = 0
-    if result["ema_ok"]:
-        score += 20
-    if result["vwap_ok"]:
-        score += 20
-    if result["rsi_ok"]:
-        score += 15
-    if result["volume_ok"]:
-        score += 15
-    if result["clv_ok"]:
-        score += 15
-    if result["rs_ok"]:
-        score += 10
-    if result["candle_ok"]:
-        score += 5
+    price_change_pct = ((current_price - prev_close) / prev_close) * 100.0
+    price_ma20 = float(df["close"].tail(BSJP_PRICE_MA_PERIOD).mean())
 
-    result["score"] = score
+    volume_today = float(df["volume"].iloc[-1])
+    volume_ma20 = float(df["volume"].tail(BSJP_VOLUME_MA_PERIOD).mean())
+    volume_ratio = (volume_today / volume_ma20) if volume_ma20 > 0 else 0.0
+
+    if "value" in df.columns and pd.notna(df["value"].iloc[-1]):
+        value_today = float(df["value"].iloc[-1])
+    else:
+        value_today = current_price * volume_today
+
+    result["close_price"] = current_price
+    result["prev_close"] = prev_close
+    result["price_change_pct"] = round(price_change_pct, 2)
+    result["price_ma20"] = round(price_ma20, 2)
+    result["volume_today"] = volume_today
+    result["volume_ma20"] = round(volume_ma20, 2)
+    result["volume_ratio"] = round(volume_ratio, 2)
+    result["value_today"] = value_today
+
+    eps = 1e-9
+    checks = {
+        "change_min_ok": bool(price_change_pct >= BSJP_MIN_PRICE_CHANGE_PCT - eps),
+        "change_max_ok": bool(price_change_pct <= BSJP_MAX_PRICE_CHANGE_PCT + eps),
+        "above_ma20_ok": bool(current_price >= price_ma20 - eps),
+        "volume_ma20_ok": bool(volume_ma20 > 0 and volume_today >= (BSJP_MIN_VOLUME_MA_MULTIPLIER * volume_ma20) - eps),
+        "value_ok": bool(value_today >= BSJP_MIN_VALUE_TODAY_IDR - eps),
+    }
+    result["checks"] = checks
+
+    all_passed = all(checks.values())
+    result["passed"] = all_passed
+    result["hard_filter_pass"] = all_passed
+
+    if not all_passed:
+        failed = [k for k, ok in checks.items() if not ok]
+        result["reason"] = f"FAILED: {', '.join(failed)}"
+        return result
+
+    result["score"] = _compute_ranking_score(volume_ratio, value_today)
     result["reason"] = "OK"
     return result
 
@@ -301,37 +201,37 @@ def run_bsjp_screener(universe: List[str]) -> List[Dict[str, Any]]:
     """
     Jalankan BSJP screener untuk seluruh universe dengan safe rate-limiting.
     Menggunakan 3 worker terkendali + micro-delay agar aman dari blokir Yahoo Finance.
-    Kembalikan daftar saham yang lolos (skor ≥ 70), diurutkan dari skor tertinggi.
+    Kembalikan daftar saham yang lolos seluruh 5 kriteria, diurutkan terbaik terlebih dahulu.
     """
-    ihsg_ret = _ihsg_return_today()
-    results = []
+    results: List[Dict[str, Any]] = []
     total = len(universe)
     print(f"🔍 Mulai scanning {total} saham BSJP (Safe Rate Limit mode)...")
 
     def _eval(ticker: str):
         try:
-            # Micro-delay 0.1s untuk mencegah burst IP rate limit
             time.sleep(0.1)
-            return compute_bsjp_score(ticker, ihsg_ret=ihsg_ret)
+            return evaluate_bsjp_stock(ticker)
         except Exception as e:
             logger.debug(f"[BSJP] Error on {ticker}: {e}")
             return None
 
     completed = 0
-    # max_workers=3 aman dari rate limit Yahoo Finance
     with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {executor.submit(_eval, t): t for t in universe}
         for future in as_completed(futures):
             completed += 1
-            ticker_name = futures[future]
             res = future.result()
-            if res and res.get("score", 0) >= 70:
+            if res and res.get("passed"):
                 results.append(res)
-                print(f"  ⭐ [{completed}/{total}] {res['ticker']} LOLOS BSJP (Skor: {res['score']})")
+                print(
+                    f"  ⭐ [{completed}/{total}] {res['ticker']} LOLOS BSJP "
+                    f"(+{res['price_change_pct']}%, Vol {res['volume_ratio']}x MA20, "
+                    f"Val Rp{res['value_today']/1e9:.1f}M)"
+                )
                 logger.info(f"[BSJP] {res['ticker']} LOLOS score={res['score']}")
             elif completed % 10 == 0 or completed == total:
                 print(f"  ⏳ [{completed}/{total}] Memeriksa saham... (Aman & stabil)")
 
-    results.sort(key=lambda x: x["score"], reverse=True)
+    results.sort(key=lambda x: (x["score"], x.get("value_today") or 0), reverse=True)
     print(f"\n✅ Selesai! Ditemukan {len(results)} kandidat BSJP.")
     return results
