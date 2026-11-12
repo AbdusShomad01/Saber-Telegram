@@ -469,20 +469,46 @@ class TestIntradayTightenedFilters:
         assert r.passed is True
 
     def test_intraday_volume_tightened_to_200k(self, engine):
-        """Volume 150.000 lembar gugur di intraday (karena min 200.000)."""
+        """Total volume Sesi 1 = 150.000 lembar harus gugur (min 200.000 lembar di Sesi 1)."""
         tech = make_technical(volume_avg_20=150_000)
-        ohlcv = make_ohlcv_df(avg_value=5_000_000_000)
+        dates = pd.date_range("2026-11-12 09:00", periods=10, freq="15min")
+        ohlcv = pd.DataFrame({
+            "date": dates,
+            "close": [1000.0] * 10,
+            "volume": [15_000] * 10,          # total Sesi 1 = 150.000 < 200.000
+            "value": [1_500_000_000] * 10,    # total Sesi 1 = Rp 15 Miliar (>= 10B)
+        })
         r = engine._check_liquidity_filter(tech, ohlcv, timeframe="15m")
         assert r.passed is False
         assert r.category == "volume"
 
-    def test_intraday_value_tightened_to_2b(self, engine):
-        """Value Rp 1.5 Miliar gugur di intraday (karena min Rp 2 Miliar)."""
+    def test_intraday_session1_value_must_reach_10b(self, engine):
+        """Total nilai transaksi Sesi 1 < Rp 10 Miliar gugur (meski Sesi 2 ramai), >= Rp 10 Miliar lolos."""
         tech = make_technical(volume_avg_20=500_000)
-        ohlcv = make_ohlcv_df(avg_value=1_500_000_000)
-        r = engine._check_liquidity_filter(tech, ohlcv, timeframe="15m")
-        assert r.passed is False
-        assert r.category == "value"
+        s1_dates = pd.date_range("2026-11-12 09:00", periods=10, freq="15min")
+        s2_dates = pd.date_range("2026-11-12 13:30", periods=6, freq="15min")
+        all_dates = s1_dates.append(s2_dates)
+
+        # Sesi 1 total = 10 * 800 juta = Rp 8 Miliar (< 10B), Sesi 2 total = Rp 60 Miliar -> tetap GUGUR
+        ohlcv_low_s1 = pd.DataFrame({
+            "date": all_dates,
+            "close": [1000.0] * len(all_dates),
+            "volume": [500_000] * len(all_dates),
+            "value": [800_000_000] * len(s1_dates) + [10_000_000_000] * len(s2_dates),
+        })
+        r_fail = engine._check_liquidity_filter(tech, ohlcv_low_s1, timeframe="15m")
+        assert r_fail.passed is False
+        assert r_fail.category == "value"
+
+        # Sesi 1 total = 10 * 1.1 Miliar = Rp 11 Miliar (>= 10B, meski per-bar < Rp 2 Miliar) -> LOLOS
+        ohlcv_ok_s1 = pd.DataFrame({
+            "date": s1_dates,
+            "close": [1000.0] * len(s1_dates),
+            "volume": [100_000] * len(s1_dates),
+            "value": [1_100_000_000] * len(s1_dates),
+        })
+        r_pass = engine._check_liquidity_filter(tech, ohlcv_ok_s1, timeframe="15m")
+        assert r_pass.passed is True
 
 
 # ─────────────────────────────────────────────

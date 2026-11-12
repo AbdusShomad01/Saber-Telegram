@@ -541,11 +541,12 @@ class ScoringEngine:
     ADX_HARD_FILTER_THRESHOLD     = 12              # min ADX 12 untuk daily (pagi hari)
     ADX_WARMUP_DAYS               = 28              # Wilder's smoothing butuh ~28 bar untuk stabil
     DAILY_LIQUIDITY_WINDOW_DAYS   = 5               # rata-rata 5 hari untuk volume & value daily
-    INTRADAY_LIQUIDITY_WINDOW_BARS = 20             # rata-rata 20 bar untuk volume & value intraday
+    INTRADAY_LIQUIDITY_WINDOW_BARS = 20             # window fallback jika kolom date tidak tersedia
     MIN_AVG_VOLUME_LOT            = 200_000         # 200 ribu lembar/hari (avg 5 hari) untuk daily
     MIN_AVG_VALUE_IDR             = 1_000_000_000   # Rp 1 miliar/hari (avg 5 hari) untuk daily
-    MIN_AVG_VOLUME_LOT_INTRADAY   = 200_000         # 200 ribu lembar (~2.000 lot) untuk intraday
-    MIN_AVG_VALUE_IDR_INTRADAY    = 2_000_000_000   # Rp 2 miliar untuk intraday
+    MIN_AVG_VOLUME_LOT_INTRADAY   = 200_000         # 200 ribu lembar (~2.000 lot) total Sesi 1 untuk intraday
+    MIN_SESSION1_VALUE_IDR_INTRADAY = 10_000_000_000 # Rp 10 miliar total transaksi Sesi 1 untuk intraday
+    MIN_AVG_VALUE_IDR_INTRADAY    = MIN_SESSION1_VALUE_IDR_INTRADAY
     MAX_ATR_PCT                   = 10.0            # % untuk daily (pagi hari)
     MAX_ATR_PCT_INTRADAY          = 7.0             # % untuk intraday
     MAX_PREV_DAY_GAIN_PCT         = 20.0            # % untuk daily (saham naik > 20% kemarin gugur)
@@ -819,57 +820,98 @@ class ScoringEngine:
             )
         return HardFilterResult(passed=True)
 
-    def _check_liquidity_filter(self, technical: Dict, ohlcv_df, timeframe: str = "1d", pure_technical: bool = False) -> HardFilterResult:
-        """
-        Volume DAN Value check dengan threshold & window adaptif:
-        - Daily (1d / pagi hari): rata-rata 5 hari — volume min 200.000 lembar, value min Rp 1 Miliar
-        - Intraday (15m/60m / pure technical): rata-rata 20 bar — volume min 200.000 lembar, value min Rp 2 Miliar
-        """
-        if settings.DATA_PROVIDER == "mock":
-            return HardFilterResult(passed=True)
+    @staticmethod
+    def _get_latest_session1_df(ohlcv_df: pd.DataFrame) -> pd.DataFrame:
+        """Ambil seluruh bar Sesi 1 (<= 12:00 WIB) pada hari perdagangan terakhir."""
+        dts = pd.to_datetime(ohlcv_df["date"])
+        if getattr(dts.dt, "tz", None) is not None:
+            dts = dts.dt.tz_convert("Asia/Jakarta")
+        last_date = dts.dt.date.iloc[-1]
+        day_mask = dts.dt.date == last_date
+        day_df = ohlcv_df.loc[day_mask]
+        dts_day = dts.loc[day_mask]
+        has_clock = bool((dts_day.dt.hour != 0).any() or (dts_day.dt.minute != 0).any())
+        if not has_clock:
+            return day_df
+        sesi1_mask = (dts_day.dt.hour < 12) | ((dts_day.dt.hour == 12) & (dts_day.dt.minute == 0))
+        return day_df.loc[sesi1_mask]
 
-        is_intraday = self._is_intraday(timeframe, pure_technical=pure_technical)
-        min_vol = self.MIN_AVG_VOLUME_LOT_INTRADAY if is_intraday else self.MIN_AVG_VOLUME_LOT
-        min_val = self.MIN_AVG_VALUE_IDR_INTRADAY if is_intraday else self.MIN_AVG_VALUE_IDR
-        window = self.INTRADAY_LIQUIDITY_WINDOW_BARS if is_intraday else self.DAILY_LIQUIDITY_WINDOW_DAYS
-        unit_label = "bar" if is_intraday else "hari"
-
-        if is_intraday:
-            vol_avg = technical.get("volume_avg_20", 0) or 0
-        else:
-            if "volume_avg_5" in technical and technical["volume_avg_5"] is not None:
-                vol_avg = technical["volume_avg_5"] or 0
-            elif ohlcv_df is not None and len(ohlcv_df) > 0 and "volume" in ohlcv_df.columns and "volume_avg_20" not in technical:
-                vol_avg = float(ohlcv_df["volume"].tail(window).mean())
-            else:
-                vol_avg = technical.get("volume_avg_20", 0) or 0
-        volume_passed = vol_avg >= min_vol
-
-        value_passed = True  # default jika kolom tidak tersedia
-        avg_value_display = 0.0
-        if ohlcv_df is not None and len(ohlcv_df) > 0 and "value" in ohlcv_df.columns:
-            avg_value_display = float(ohlcv_df["value"].tail(window).mean())
-            value_passed = avg_value_display >= min_val
-
+    @staticmethod
+    def _build_liquidity_result(
+        vol_val: float, min_vol: float, val_val: float, min_val: float,
+        has_value_col: bool, scope_label: str,
+    ) -> HardFilterResult:
+        """Evaluasi volume dan value terhadap threshold lalu format pesan kegagalan."""
+        volume_passed = vol_val >= min_vol
+        value_passed = (val_val >= min_val) if has_value_col else True
         if not volume_passed and not value_passed:
             return HardFilterResult(
                 passed=False, category="volume_and_value",
                 reason=(
-                    f"Gagal volume avg {window} {unit_label} ({vol_avg:,.0f} < {min_vol:,.0f}) "
-                    f"DAN value (Rp{avg_value_display/1e9:.2f}M < Rp{min_val/1e9:.1f}M)"
-                )
+                    f"Gagal volume {scope_label} ({vol_val:,.0f} < {min_vol:,.0f}) "
+                    f"DAN value {scope_label} (Rp{val_val/1e9:.2f}M < Rp{min_val/1e9:.1f}M)"
+                ),
             )
         if not volume_passed:
             return HardFilterResult(
                 passed=False, category="volume",
-                reason=f"Volume avg {window} {unit_label} terlalu rendah ({vol_avg:,.0f}) — minimum {min_vol:,.0f}"
+                reason=f"Volume {scope_label} terlalu rendah ({vol_val:,.0f}) — minimum {min_vol:,.0f}",
             )
         if not value_passed:
             return HardFilterResult(
                 passed=False, category="value",
-                reason=f"Nilai transaksi rata-rata {window} {unit_label} terlalu rendah (Rp{avg_value_display/1e9:.2f}M) — minimum Rp{min_val/1e9:.1f}M"
+                reason=f"Nilai transaksi {scope_label} terlalu rendah (Rp{val_val/1e9:.2f}M) — minimum Rp{min_val/1e9:.1f}M",
             )
         return HardFilterResult(passed=True)
+
+    def _check_liquidity_filter(self, technical: Dict, ohlcv_df, timeframe: str = "1d", pure_technical: bool = False) -> HardFilterResult:
+        """
+        Volume DAN Value check adaptif:
+        - Daily (1d / pagi hari): rata-rata 5 hari — volume min 200.000 lembar, value min Rp 1 Miliar
+        - Intraday (15m/60m / pure technical): akumulasi Sesi 1 hari terakhir — volume min 200.000 lembar, value min Rp 10 Miliar
+        """
+        if settings.DATA_PROVIDER == "mock":
+            return HardFilterResult(passed=True)
+
+        has_df = ohlcv_df is not None and len(ohlcv_df) > 0
+        has_value_col = bool(has_df and "value" in ohlcv_df.columns)
+
+        if self._is_intraday(timeframe, pure_technical=pure_technical):
+            if has_df and "date" in ohlcv_df.columns:
+                sesi1_df = self._get_latest_session1_df(ohlcv_df)
+                vol_val = (
+                    float(sesi1_df["volume"].sum() or 0)
+                    if "volume" in sesi1_df.columns
+                    else (technical.get("volume_avg_20", 0) or 0)
+                )
+                val_val = float(sesi1_df["value"].sum() or 0) if has_value_col else 0.0
+            else:
+                vol_val = technical.get("volume_avg_20", 0) or 0
+                val_val = (
+                    float(ohlcv_df["value"].tail(self.INTRADAY_LIQUIDITY_WINDOW_BARS).sum() or 0)
+                    if has_value_col
+                    else 0.0
+                )
+            return self._build_liquidity_result(
+                vol_val, self.MIN_AVG_VOLUME_LOT_INTRADAY,
+                val_val, self.MIN_SESSION1_VALUE_IDR_INTRADAY,
+                has_value_col, "Sesi 1",
+            )
+
+        window = self.DAILY_LIQUIDITY_WINDOW_DAYS
+        if "volume_avg_5" in technical and technical["volume_avg_5"] is not None:
+            vol_avg = technical["volume_avg_5"] or 0
+        elif has_df and "volume" in ohlcv_df.columns and "volume_avg_20" not in technical:
+            vol_avg = float(ohlcv_df["volume"].tail(window).mean())
+        else:
+            vol_avg = technical.get("volume_avg_20", 0) or 0
+
+        avg_val = float(ohlcv_df["value"].tail(window).mean()) if has_value_col else 0.0
+        return self._build_liquidity_result(
+            vol_avg, self.MIN_AVG_VOLUME_LOT,
+            avg_val, self.MIN_AVG_VALUE_IDR,
+            has_value_col, f"avg {window} hari",
+        )
 
     def _check_atr_filter(self, technical: Dict, timeframe: str = "1d", pure_technical: bool = False) -> HardFilterResult:
         """ATR filter: tolak saham yang terlalu volatile (> 10% untuk daily, > 7% untuk intraday)."""
