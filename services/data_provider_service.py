@@ -129,8 +129,10 @@ class DataProviderService:
                     with _YFINANCE_DOWNLOAD_LOCK:
                         data = yf.download(yf_ticker, period="1mo", interval=interval, progress=False)
             else:
+                # yfinance memperlakukan parameter `end` secara eksklusif; +1 hari agar bar `end` (mis. hari ini) ikut terambil
+                yf_end = (end + timedelta(days=1)) if isinstance(end, date) else end
                 with _YFINANCE_DOWNLOAD_LOCK:
-                    data = yf.download(yf_ticker, start=str(start), end=str(end), interval=interval, progress=False)
+                    data = yf.download(yf_ticker, start=str(start), end=str(yf_end), interval=interval, progress=False)
 
             if data.empty:
                 logger.warning(f"No yfinance data for {ticker}")

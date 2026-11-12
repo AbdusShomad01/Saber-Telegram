@@ -322,6 +322,98 @@ def test_vwap_equal_close_no_false_bearish_penalty():
     assert not any(r.name == "Price < VWAP" for r in rules)
 
 
+def test_calibrated_volume_atr_and_liquidity_rules():
+    """Validasi rule Volume Dry Up kontekstual, ATR 1.5-5.5%, dan likuiditas >= 5B/25B/100B."""
+    engine = ScoringEngine()
+
+    # Volume Dry Up tidak menghukum konsolidasi di atas EMA20 atau fase oversold
+    quiet_uptrend = engine._score_volume_liquidity({"volume_dry_up": True, "price_above_ema20": True, "rsi": 52})
+    assert not any(r.name == "Volume Dry Up" for r in quiet_uptrend)
+
+    quiet_oversold = engine._score_volume_liquidity({"volume_dry_up": True, "price_above_ema20": False, "rsi": 35})
+    assert not any(r.name == "Volume Dry Up" for r in quiet_oversold)
+
+    weak_dry_up = engine._score_volume_liquidity({"volume_dry_up": True, "price_above_ema20": False, "rsi": 50})
+    assert any(r.name == "Volume Dry Up" and r.score == -2 for r in weak_dry_up)
+
+    # Likuiditas mid-cap (5B -> +2), strong (25B -> +3), high (100B -> +5)
+    for avg_val, expected_score in [(5e9, 2), (25e9, 3), (100e9, 5)]:
+        df_liq = make_ohlcv(25)
+        df_liq["value"] = avg_val
+        liq_rules = engine._score_volume_liquidity({}, df_liq)
+        assert any("Value Liquidity" in r.name and r.score == expected_score for r in liq_rules)
+
+    # ATR 1.5-5.5% sehat (+4), 6.5% netral, >7.5% penalti (-3)
+    rr_mid = engine._score_risk_reward({"atr_percent": 4.5, "_data_length": 60})
+    assert any(r.name == "Healthy Volatility (ATR)" and r.score == 4 for r in rr_mid)
+    rr_six = engine._score_risk_reward({"atr_percent": 6.5, "_data_length": 60})
+    assert not any("ATR" in r.name for r in rr_six)
+    rr_extreme = engine._score_risk_reward({"atr_percent": 8.0, "_data_length": 60})
+    assert any(r.name == "Too Volatile (ATR)" and r.score == -3 for r in rr_extreme)
+
+
+def test_technical_scaling_standard_and_pure_technical():
+    """Standard mode memakai skala 1.25x (clamp <=75) & pure_technical memakai 1.45x (clamp <=100)."""
+    engine = ScoringEngine()
+    df = make_ohlcv(60, trend="up")
+    technical = make_technical_bullish()
+    technical["_data_length"] = 60
+
+    std_res = engine.score(
+        ticker="CALB.JK",
+        technical=technical,
+        pattern=make_pattern("bullish"),
+        candle=make_candle("bullish"),
+        bandarmology=make_bandarmology(real=True, signal="strong_accumulation"),
+        foreign_flow=make_foreign_flow(real=True, signal="strong_foreign_buy"),
+        ohlcv_df=df,
+        timeframe="1d",
+        gap_analysis={"gap_type": "gap_up_confirmed", "gap_pct": 1.5, "gap_confirmed": True, "gap_score": 5},
+        sector_correlation={"corr_signal": "outperform", "relative_strength": 3.0, "sector_score": 4},
+        pure_technical=False,
+    )
+    tech_cats = ScoringEngine.TECHNICAL_CATEGORIES
+    unscaled_tech = sum(std_res.category_scores[c] for c in tech_cats)
+    flow_sum = std_res.category_scores["bandarmology"] + std_res.category_scores["foreign_flow"]
+    expected_tech = min(75.0, round(unscaled_tech * ScoringEngine.TECHNICAL_SCORE_SCALE, 1))
+    assert abs(std_res.total_score - round(expected_tech + flow_sum, 1)) < 0.15
+    assert expected_tech <= 75.0
+    assert 0.0 <= std_res.total_score <= 100.0
+
+    pure_res = engine.score(
+        ticker="CALB.JK",
+        technical=technical,
+        pattern=make_pattern("bullish"),
+        candle=make_candle("bullish"),
+        bandarmology={},
+        foreign_flow={},
+        ohlcv_df=df,
+        timeframe="1h",
+        gap_analysis={"gap_type": "gap_up_confirmed", "gap_pct": 1.5, "gap_confirmed": True, "gap_score": 5},
+        sector_correlation={"corr_signal": "outperform", "relative_strength": 3.0, "sector_score": 4},
+        pure_technical=True,
+    )
+    pure_tech_raw = sum(pure_res.category_scores[c] for c in tech_cats)
+    expected_pure = min(100.0, round(pure_tech_raw * ScoringEngine.PURE_TECHNICAL_SCORE_SCALE, 1))
+    assert abs(pure_res.total_score - expected_pure) < 0.15
+    assert pure_res.category_scores["bandarmology"] == 0.0
+    assert pure_res.category_scores["foreign_flow"] == 0.0
+    assert 0.0 <= pure_res.total_score <= 100.0
+
+
+def test_yfinance_fetch_end_date_is_inclusive():
+    """yf.download memperlakukan `end` secara eksklusif; pastikan +1 hari diteruskan agar hari terakhir tidak terpotong."""
+    from datetime import date
+    from unittest.mock import patch
+    from services.data_provider_service import DataProviderService
+
+    dp = DataProviderService()
+    with patch("yfinance.download", return_value=pd.DataFrame()) as mock_dl:
+        dp._fetch_yfinance("^JKSE", date(2026, 11, 1), date(2026, 11, 12), interval="1d")
+        assert mock_dl.called
+        assert mock_dl.call_args.kwargs["end"] == "2026-11-13"
+
+
 if __name__ == "__main__":
     tests = [
         test_weights_sum_free,
@@ -332,6 +424,9 @@ if __name__ == "__main__":
         test_score_in_range_free_mode,
         test_score_in_range_premium_mode,
         test_score_bearish_not_negative,
+        test_calibrated_volume_atr_and_liquidity_rules,
+        test_technical_scaling_standard_and_pure_technical,
+        test_yfinance_fetch_end_date_is_inclusive,
     ]
     
     print("=" * 60)

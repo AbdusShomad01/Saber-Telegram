@@ -220,6 +220,21 @@ class ScoringEngine:
         "foreign_flow":       10,
     }
 
+    TECHNICAL_CATEGORIES = (
+        "trend_momentum",
+        "volume_liquidity",
+        "pattern",
+        "gap_analysis",
+        "sector_correlation",
+        "support_resistance",
+    )
+    # Kalibrasi linear skor teknikal pada standard mode (maks 75 poin) & pure_technical mode (maks 100 poin):
+    # Karena banyak rule teknikal saling eksklusif, skor gabungan realistis mentok ~60/75 (standard)
+    # atau ~50/100 (pure technical). Kalibrasi 1.25x / 1.45x membuka akses ke BUY/STRONG BUY
+    # tanpa mengubah urutan ranking maupun mengencerkan win rate.
+    TECHNICAL_SCORE_SCALE = 1.25
+    PURE_TECHNICAL_SCORE_SCALE = 1.45
+
     # Bobot khusus untuk Screener Siang (Noon Intraday) — PURE TEKNIKAL (Tanpa Bandarmologi & Foreign Flow)
     # Total WAJIB 100 poin murni dari analisis teknikal, momentum, pola, dan volume
     CATEGORIES_PURE_TECHNICAL = {
@@ -393,7 +408,28 @@ class ScoringEngine:
 
         result.category_scores      = cat_scores
         result.category_raw_scores  = cat_raw
-        result.total_score          = sum(cat_scores.values())
+
+        tech_subtotal = sum(cat_scores.get(c, 0.0) for c in self.TECHNICAL_CATEGORIES)
+        flow_subtotal = (
+            0.0
+            if pure_technical
+            else cat_scores.get("bandarmology", 0.0) + cat_scores.get("foreign_flow", 0.0)
+        )
+        scale_factor = self.PURE_TECHNICAL_SCORE_SCALE if pure_technical else self.TECHNICAL_SCORE_SCALE
+        tech_cap = 100.0 if pure_technical else 75.0
+        scaled_tech = min(tech_cap, round(tech_subtotal * scale_factor, 1))
+        scale_bonus = round(scaled_tech - tech_subtotal, 1)
+        result.total_score = round(scaled_tech + flow_subtotal, 1)
+        if scale_bonus > 0:
+            result.rule_results.append(
+                RuleResult(
+                    f"Technical Alignment Scale ({scale_factor:.2f}x)",
+                    scale_bonus,
+                    tech_cap,
+                    "trend_momentum",
+                    f"Kalibrasi teknikal gabungan {tech_subtotal:.1f}/{tech_cap:.0f} -> {scaled_tech:.1f}/{tech_cap:.0f}",
+                )
+            )
 
         # ============================================================ #
         #  MULTI-TIMEFRAME BONUS/PENALTY (if daily trend data available)
@@ -1118,20 +1154,24 @@ class ScoringEngine:
         if t.get("obv_rising"):
             rules.append(RuleResult("OBV Rising", 4, 4, cat, "On Balance Volume naik"))
 
-        # Volume dry-up (negative)
+        # Volume dry-up (negative) — hanya penalti jika sedang lemah/downtrend;
+        # konsolidasi tenang di atas EMA20 atau fase oversold tidak dihukum
         if t.get("volume_dry_up"):
-            rules.append(RuleResult("Volume Dry Up", -3, 3, cat, "Volume terlalu rendah"))
+            if not t.get("price_above_ema20") and (t.get("rsi") or 50) >= 40:
+                rules.append(RuleResult("Volume Dry Up", -2, 3, cat, "Volume terlalu rendah di fase lemah"))
 
-        # Value Liquidity Confirmation: avg daily value tinggi = saham blue chip / likuid
-        # Rule ini menutup gap antara max achievable (~19) dan bobot kategori (28)
+        # Value Liquidity Confirmation: likuiditas nilai transaksi harian (Rp)
         if ohlcv_df is not None and "value" in ohlcv_df.columns and len(ohlcv_df) >= 20:
-            avg_value = ohlcv_df["value"].tail(20).mean()
-            if avg_value >= 100_000_000_000:  # > Rp 100 miliar / hari
+            avg_value = float(ohlcv_df["value"].tail(20).mean())
+            if avg_value >= 100_000_000_000:  # >= Rp 100 miliar / hari
                 rules.append(RuleResult("High Value Liquidity", 5, 5, cat,
                                         f"Avg daily value Rp{avg_value/1e9:.0f}B — very liquid, slippage minimal"))
-            elif avg_value >= 50_000_000_000:  # > Rp 50 miliar / hari
-                rules.append(RuleResult("Good Value Liquidity", 3, 5, cat,
-                                        f"Avg daily value Rp{avg_value/1e9:.0f}B — good liquidity"))
+            elif avg_value >= 25_000_000_000:  # >= Rp 25 miliar / hari
+                rules.append(RuleResult("Strong Value Liquidity", 3, 5, cat,
+                                        f"Avg daily value Rp{avg_value/1e9:.0f}B — strong liquidity"))
+            elif avg_value >= 5_000_000_000:  # >= Rp 5 miliar / hari
+                rules.append(RuleResult("Good Value Liquidity", 2, 5, cat,
+                                        f"Avg daily value Rp{avg_value/1e9:.1f}B — good mid-cap liquidity"))
 
         # Volume-Price Divergence: volume naik tapi harga turun = akumulasi terselubung (+3)
         if ohlcv_df is not None and len(ohlcv_df) >= 10:
@@ -1414,10 +1454,10 @@ class ScoringEngine:
 
         # ATR Volatility (valid setelah 14 hari)
         atr_pct = t.get("atr_percent", 0)
-        if atr_pct and 1.5 <= atr_pct <= 4.0:
+        if atr_pct and 1.5 <= atr_pct <= 5.5:
             rules.append(RuleResult("Healthy Volatility (ATR)", 4, 4, cat,
                                     f"ATR% = {atr_pct:.1f}% (optimal untuk entry)"))
-        elif atr_pct and atr_pct > 6.0:
+        elif atr_pct and atr_pct > 7.5:
             rules.append(RuleResult("Too Volatile (ATR)", -3, 4, cat,
                                     f"ATR% = {atr_pct:.1f}% — risiko terlalu besar"))
 
