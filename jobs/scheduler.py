@@ -37,11 +37,6 @@ from services.outcome_tracker import (
 )
 from templates.telegram_signal_template import format_scan_summary
 
-try:
-    from services.kantor_bridge import sync_kantor_laporan
-except ImportError:
-    sync_kantor_laporan = None
-
 logger = logging.getLogger(__name__)
 
 
@@ -349,13 +344,6 @@ async def job_daily_scan():
         else:
             logger.warning("[Scheduler] Telegram not configured — skipping send")
 
-        # Update 3D Kantor AI dashboard
-        if sync_kantor_laporan:
-            try:
-                sync_kantor_laporan()
-            except Exception:
-                pass
-
     except Exception as e:
         logger.error(f"[Scheduler] Daily scan error: {e}", exc_info=True)
 
@@ -491,13 +479,6 @@ async def job_intraday_scan(interval_override: str | None = None, pure_technical
             logger.info(f"[Scheduler] Sent {len(bullish_signals)} bullish signals ({'pure technical' if pure_technical else 'standard'}) with charts to Telegram")
         else:
             logger.warning("[Scheduler] Telegram not configured — skipping send")
-
-        # Update 3D Kantor AI dashboard
-        if sync_kantor_laporan:
-            try:
-                sync_kantor_laporan()
-            except Exception:
-                pass
 
     except Exception as e:
         logger.error(f"[Scheduler] Intraday scan error: {e}", exc_info=True)
@@ -689,13 +670,6 @@ async def job_signal_followup():
                 logger.info(f"[Scheduler] Sent follow-up + saved outcomes. Avg P&L: {avg_pnl:+.2f}%, Winrate: {today_winrate:.0f}%")
             else:
                 logger.warning("[Scheduler] Telegram not configured — skipping follow-up send")
-
-            # Update 3D Kantor AI dashboard
-            if sync_kantor_laporan:
-                try:
-                    sync_kantor_laporan()
-                except Exception:
-                    pass
 
     except Exception as e:
         logger.error(f"[Scheduler] Signal follow-up error: {e}", exc_info=True)

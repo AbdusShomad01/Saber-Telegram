@@ -303,4 +303,3 @@ def test_daily_candles_date_filtering():
     assert res["status"] == "TP1_HIT"
     assert res["tp_hit"] is True
     assert res["outcome_price"] == 5200.0
-

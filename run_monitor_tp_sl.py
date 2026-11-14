@@ -335,13 +335,6 @@ async def monitor_signals(force: bool = False):
         except Exception as err:
             logger.error(f"Error memantau saham {ticker}: {err}")
 
-    # Sinkronisasi status terbaru ke dashboard Kantor AI 3D
-    try:
-        from services.kantor_bridge import sync_kantor_laporan
-        sync_kantor_laporan()
-    except Exception as e:
-        logger.debug(f"Sinkronisasi Kantor AI 3D dilewati: {e}")
-
 
 if __name__ == "__main__":
     force_run = "--force" in sys.argv
