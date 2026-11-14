@@ -6,8 +6,10 @@ into the SQLite database for historical winrate tracking.
 
 import sqlite3
 import logging
-from datetime import date, datetime
-from typing import List, Dict, Optional, Tuple
+from datetime import date, datetime, timezone, timedelta
+from typing import List, Dict, Optional, Tuple, Any
+from zoneinfo import ZoneInfo
+import pandas as pd
 
 from app.config import get_settings
 
@@ -96,6 +98,255 @@ def get_pending_signals(days_back: int = 7, timeframe: Optional[str] = None) -> 
     except Exception as e:
         logger.error(f"[OutcomeTracker] get_pending_signals error: {e}")
         return []
+
+
+def filter_candles_after_signal(signal: Dict, ohlcv: pd.DataFrame) -> pd.DataFrame:
+    """
+    Filter bars/candles from OHLCV dataframe to only include bars that occurred
+    on or after the signal creation timestamp (created_at).
+
+    Handles:
+    - Timezone-aware intraday bars (e.g. Asia/Jakarta, UTC).
+    - Timezone-naive intraday bars (localizing to Asia/Jakarta if trading hours 09:00-16:05).
+    - Daily bars (comparing against WIB date of the signal).
+    - SQLite UTC timestamps in signal['created_at'].
+    """
+    if ohlcv is None or ohlcv.empty or "date" not in ohlcv.columns:
+        return pd.DataFrame()
+
+    created_val = signal.get("created_at")
+    if isinstance(created_val, datetime):
+        created_dt = created_val
+    elif isinstance(created_val, date) and not isinstance(created_val, datetime):
+        created_dt = datetime.combine(created_val, datetime.min.time())
+    elif created_val:
+        s = str(created_val).strip()
+        created_dt = None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d"):
+            try:
+                created_dt = datetime.strptime(s.split(".")[0], fmt)
+                break
+            except ValueError:
+                continue
+        if created_dt is None:
+            created_dt = datetime.utcnow()
+    else:
+        created_dt = datetime.utcnow()
+
+    # SQLite func.now() and CURRENT_TIMESTAMP are stored in UTC
+    if created_dt.tzinfo is None:
+        created_utc = created_dt.replace(tzinfo=timezone.utc)
+    else:
+        created_utc = created_dt.astimezone(timezone.utc)
+
+    try:
+        dts = pd.to_datetime(ohlcv["date"])
+        if dts.empty:
+            return pd.DataFrame()
+
+        # Check if candle timestamps have clock time (intraday) or are purely dates
+        has_clock = bool((dts.dt.hour != 0).any() or (dts.dt.minute != 0).any())
+
+        if not has_clock:
+            # Daily bars: compare against WIB date of the signal
+            created_wib = created_utc.astimezone(ZoneInfo("Asia/Jakarta"))
+            mask = dts.dt.date >= created_wib.date()
+        else:
+            # Intraday bars
+            if getattr(dts.dt, "tz", None) is not None:
+                dts_utc = dts.dt.tz_convert("UTC")
+            else:
+                # Naive: if hours >= 8, it's local Asia/Jakarta time (IDX hours: 09:00 - 16:05)
+                if (dts.dt.hour >= 8).any():
+                    dts_utc = dts.dt.tz_localize("Asia/Jakarta").dt.tz_convert("UTC")
+                else:
+                    dts_utc = dts.dt.tz_localize("UTC")
+            mask = dts_utc >= created_utc
+
+        return ohlcv.loc[mask].copy()
+    except Exception as e:
+        logger.error(f"[OutcomeTracker] filter_candles_after_signal error: {e}")
+        return pd.DataFrame()
+
+
+def evaluate_signal_progression(
+    signal: Dict,
+    ohlcv: pd.DataFrame,
+) -> Dict[str, Any]:
+    """
+    Evaluasi perkembangan sinyal secara kronologis bar-demi-bar setelah sinyal dibuat.
+
+    Menjamin:
+    1. Hanya candle SETELAH sinyal dibuat (created_at) yang dihitung.
+    2. Urutan kronologis diperhatikan (jika candle 2 kena TP, maka TP hit; jika candle 2 kena SL, maka SL hit).
+    3. Untuk WATCHLIST (Buy on Weakness), harga harus menyentuh entry (low <= entry_price) terlebih dahulu
+       sebelum TP atau SL dapat dipicu.
+    4. max_price_seen dan min_price_seen hanya mencerminkan pergerakan nyata setelah posisi aktif.
+
+    Returns:
+        dict:
+            status: 'TP2_HIT' | 'TP1_HIT' | 'SL_HIT' | 'PENDING'
+            current_price: float
+            outcome_price: float
+            pnl_pct: float
+            tp_hit: bool
+            tp2_hit: bool
+            sl_hit: bool
+            max_seen: float
+            min_seen: float
+            entry_hit: bool
+            valid: bool
+            hit_candle_time: Any
+    """
+    entry_price = float(signal.get("entry_price") or 0)
+    tp1 = float(signal.get("tp1") or 0)
+    tp2 = float(signal.get("tp2") or 0)
+    sl = float(
+        signal.get("stop_loss_atr")
+        or signal.get("stop_loss_moderate")
+        or signal.get("stop_loss_conservative")
+        or 0
+    )
+    signal_type = str(signal.get("signal") or "BUY").upper()
+    is_watchlist = "WATCHLIST" in signal_type
+
+    if ohlcv is None or ohlcv.empty or entry_price <= 0:
+        return {
+            "status": "PENDING",
+            "current_price": entry_price,
+            "outcome_price": entry_price,
+            "pnl_pct": 0.0,
+            "tp_hit": False,
+            "tp2_hit": False,
+            "sl_hit": False,
+            "max_seen": entry_price,
+            "min_seen": entry_price,
+            "entry_hit": not is_watchlist,
+            "valid": False,
+            "hit_candle_time": None,
+        }
+
+    current_price = float(ohlcv["close"].iloc[-1])
+    valid_candles = filter_candles_after_signal(signal, ohlcv)
+
+    if valid_candles.empty:
+        return {
+            "status": "PENDING",
+            "current_price": current_price,
+            "outcome_price": current_price,
+            "pnl_pct": 0.0,
+            "tp_hit": False,
+            "tp2_hit": False,
+            "sl_hit": False,
+            "max_seen": current_price,
+            "min_seen": current_price,
+            "entry_hit": not is_watchlist,
+            "valid": False,
+            "hit_candle_time": None,
+        }
+
+    entry_hit = not is_watchlist
+    max_seen = 0.0
+    min_seen = 999999999.0
+    tp_hit = False
+    tp2_hit = False
+    sl_hit = False
+    hit_status = "PENDING"
+    outcome_price = current_price
+    hit_candle_time = None
+
+    for _, row in valid_candles.iterrows():
+        c_high = float(row.get("high") or 0)
+        c_low = float(row.get("low") or 0)
+        c_close = float(row.get("close") or 0)
+        c_date = row.get("date")
+
+        # Jika WATCHLIST, tunggu hingga low menyentuh <= entry_price
+        if not entry_hit:
+            if c_low <= entry_price:
+                entry_hit = True
+                max_seen = max(max_seen, c_high)
+                min_seen = min(min_seen, c_low)
+            else:
+                # Belum masuk posisi, bar ini tidak memicu TP/SL
+                continue
+        else:
+            max_seen = max(max_seen, c_high)
+            min_seen = min(min_seen, c_low)
+
+        # Cek apakah candle ini menyentuh target
+        candle_tp_hit = (c_high >= tp1) if tp1 > 0 else False
+        candle_tp2_hit = (c_high >= tp2) if tp2 > 0 else False
+        candle_sl_hit = (c_low <= sl) if sl > 0 else False
+
+        # Tie-breaker jika keduanya hit dalam satu candle yang sama
+        if (candle_tp_hit or candle_tp2_hit) and candle_sl_hit:
+            tp_dist = (c_high - entry_price) / entry_price if entry_price > 0 else 0
+            sl_dist = (entry_price - c_low) / entry_price if entry_price > 0 else 0
+            if tp_dist >= sl_dist:
+                candle_sl_hit = False
+            else:
+                candle_tp_hit = False
+                candle_tp2_hit = False
+
+        # 1. Stop Loss Hit (hanya jika TP1 belum pernah tercapai sebelumnya)
+        if candle_sl_hit and not tp_hit:
+            sl_hit = True
+            hit_status = "SL_HIT"
+            outcome_price = sl
+            hit_candle_time = c_date
+            # Posisi ditutup cutloss, candle berikutnya tidak dihitung
+            break
+
+        # 2. TP2 Hit langsung
+        if candle_tp2_hit:
+            tp_hit = True
+            tp2_hit = True
+            hit_status = "TP2_HIT"
+            outcome_price = tp2
+            hit_candle_time = c_date
+            break
+
+        # 3. TP1 Hit
+        if candle_tp_hit:
+            tp_hit = True
+            hit_status = "TP1_HIT"
+            outcome_price = tp1
+            if hit_candle_time is None:
+                hit_candle_time = c_date
+            # Lanjut ke bar berikutnya untuk cek apakah TP2 tercapai,
+            # namun stop loss tidak bisa lagi mengubah trade menjadi loss!
+
+    # Fallback normalisasi harga ekstrem
+    if max_seen == 0.0:
+        max_seen = current_price
+    if min_seen == 999999999.0:
+        min_seen = current_price
+
+    # Hitung P&L
+    if tp2_hit:
+        pnl_pct = ((tp2 - entry_price) / entry_price) * 100
+    elif tp_hit:
+        pnl_pct = ((tp1 - entry_price) / entry_price) * 100
+    elif sl_hit:
+        pnl_pct = ((sl - entry_price) / entry_price) * 100
+    else:
+        pnl_pct = ((current_price - entry_price) / entry_price) * 100 if entry_hit else 0.0
+
+    return {
+        "status": hit_status,
+        "current_price": current_price,
+        "outcome_price": outcome_price,
+        "pnl_pct": round(pnl_pct, 4),
+        "tp_hit": tp_hit,
+        "tp2_hit": tp2_hit,
+        "sl_hit": sl_hit,
+        "max_seen": max_seen,
+        "min_seen": min_seen,
+        "entry_hit": entry_hit,
+        "valid": True,
+        "hit_candle_time": hit_candle_time,
+    }
 
 
 def evaluate_outcome_from_ohlcv(

@@ -10,8 +10,9 @@ import sys
 import asyncio
 import logging
 import sqlite3
-from datetime import datetime, date, time as dtime
+from datetime import datetime, date, time as dtime, timedelta
 from typing import Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 # Tambahkan path root proyek
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -27,7 +28,11 @@ load_dotenv()
 
 from app.config import get_settings
 from services.data_provider_service import DataProviderService
-from services.outcome_tracker import _get_db_path, update_signal_outcome
+from services.outcome_tracker import (
+    _get_db_path,
+    update_signal_outcome,
+    evaluate_signal_progression,
+)
 from jobs.scheduler import send_telegram_with_retry
 
 logging.basicConfig(
@@ -195,51 +200,63 @@ async def monitor_signals(force: bool = False):
                     logger.warning(f"Data harga untuk {ticker} kosong, dilewati.")
                     continue
 
-            current_price = float(ohlcv["close"].iloc[-1])
-            intraday_high = float(ohlcv["high"].max())
-            intraday_low = float(ohlcv["low"].min())
+            # Evaluasi perkembangan sinyal secara kronologis setelah sinyal dibuat
+            eval_res = evaluate_signal_progression(s, ohlcv)
+            if not eval_res["valid"]:
+                logger.debug(f"Data candle untuk {ticker} belum ada candle setelah sinyal, dilewati.")
+                continue
 
-            prev_max = float(s.get("max_price_seen") or 0)
-            prev_min = float(s.get("min_price_seen") or 999999999)
+            current_price = eval_res["current_price"]
+            max_seen = eval_res["max_seen"]
+            min_seen = eval_res["min_seen"]
+            entry_hit = eval_res["entry_hit"]
 
-            max_seen = max(intraday_high, current_price, prev_max)
-            min_seen = min(intraday_low, current_price, prev_min) if prev_min > 0 else min(intraday_low, current_price)
+            # Jika sinyal WATCHLIST (Buy on Weakness) belum menyentuh harga entry:
+            if not entry_hit:
+                logger.info(f"⏳ {ticker} ({s.get('signal')}) belum menyentuh entry Rp{entry_price:,.0f} (Harga: Rp{current_price:,.0f}). Masih WAITING ENTRY.")
+                continue
 
+            tp_hit = eval_res["tp_hit"]
+            tp2_hit = eval_res["tp2_hit"]
+            sl_hit = eval_res["sl_hit"]
+
+            # Hitung waktu & durasi dalam WIB
             created_dt = parse_datetime(s.get("created_at"))
-            duration_str = format_duration(created_dt, now)
-            call_date_str = created_dt.strftime("%d %b %Y, %H:%M WIB")
+            created_wib = created_dt + timedelta(hours=7)
+            call_date_str = created_wib.strftime("%d %b %Y, %H:%M WIB")
 
-            # Evaluasi TP1 & SL
-            tp_hit = (max_seen >= tp1) if tp1 > 0 else False
-            sl_hit = (min_seen <= sl) if sl > 0 else False
-
-            # Jika keduanya hit dalam periode pengamatan, beri prioritas TP hit lebih dulu
-            if tp_hit and sl_hit:
-                tp_pct = (max_seen - entry_price) / entry_price
-                sl_pct = (entry_price - min_seen) / entry_price
-                if tp_pct >= sl_pct:
-                    sl_hit = False
+            hit_time = eval_res.get("hit_candle_time")
+            if hit_time is not None:
+                hit_dt = parse_datetime(hit_time)
+                if getattr(hit_dt, "tzinfo", None) is not None:
+                    hit_wib = hit_dt.astimezone(ZoneInfo("Asia/Jakarta")).replace(tzinfo=None)
                 else:
-                    tp_hit = False
+                    hit_wib = hit_dt + timedelta(hours=7) if hit_dt.hour < 8 else hit_dt
+                duration_str = format_duration(created_wib, hit_wib)
+            else:
+                duration_str = format_duration(created_wib, now)
 
-            # --- Skenario 1: TP1 TERCAPAI (PROFIT) ---
+            # --- Skenario 1: TAKE PROFIT TERCAPAI (PROFIT) ---
             if tp_hit:
-                profit_pct = ((tp1 - entry_price) / entry_price) * 100
+                target_label = "TP2" if tp2_hit else "TP1"
+                target_price = float(s.get("tp2") or tp1) if tp2_hit else tp1
+                profit_pct = ((target_price - entry_price) / entry_price) * 100
                 peak_pct = ((max_seen - entry_price) / entry_price) * 100
 
+                status_text = "✅ TP1 & TP2 HIT 💥" if tp2_hit else "✅ TP1 HIT"
                 msg = (
                     "🏆 <b>SIGNAL CONFIRMED — PROFIT!</b> 🏆\n\n"
                     f"<b>Symbol:</b> {ticker}\n"
-                    f"<b>Status:</b> ✅ TP1 HIT\n"
+                    f"<b>Status:</b> {status_text}\n"
                     f"📅 <b>Call Watchlist:</b> {call_date_str}\n"
                     f"⏱️ <b>Durasi:</b> {duration_str} (call → profit)\n"
-                    f"<b>Entry:</b> Rp{entry_price:,.0f} → <b>TP1:</b> Rp{tp1:,.0f} (+{profit_pct:.1f}%)\n"
+                    f"<b>Entry:</b> Rp{entry_price:,.0f} → <b>{target_label}:</b> Rp{target_price:,.0f} (+{profit_pct:.1f}%)\n"
                     f"<b>Peak Tertinggi:</b> Rp{max_seen:,.0f} (+{peak_pct:.1f}%)\n"
                     f"<b>Profit Terkunci:</b> +{profit_pct:.1f}%\n\n"
                     "<i>Saber Trader</i>"
                 )
 
-                logger.info(f"🎯 [TP1 HIT] {ticker} kena TP1 di Rp{tp1:,.0f} (+{profit_pct:.1f}%)")
+                logger.info(f"🎯 [{status_text}] {ticker} kena {target_label} di Rp{target_price:,.0f} (+{profit_pct:.1f}%)")
 
                 # Kirim ke Telegram
                 if bot:
@@ -251,13 +268,14 @@ async def monitor_signals(force: bool = False):
                 # Kunci status di database (Terkunci permanen, tidak dikirim lagi)
                 update_signal_outcome(
                     signal_id=signal_id,
-                    status="TP1_HIT",
-                    outcome_price=tp1,
+                    status="TP2_HIT" if tp2_hit else "TP1_HIT",
+                    outcome_price=target_price,
                     pnl_pct=round(profit_pct, 2),
                     tp_hit=True,
                     sl_hit=False,
                     max_price=max_seen,
                     min_price=min_seen,
+                    tp2_hit=tp2_hit,
                 )
 
                 # Delay anti-flood Telegram
@@ -300,6 +318,7 @@ async def monitor_signals(force: bool = False):
                     sl_hit=True,
                     max_price=max_seen,
                     min_price=min_seen,
+                    tp2_hit=False,
                 )
 
                 # Delay anti-flood Telegram

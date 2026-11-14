@@ -32,7 +32,8 @@ from services.scanner_engine import ScannerEngine
 from services.data_provider_service import DataProviderService
 from services.outcome_tracker import (
     migrate_add_outcome_columns, get_pending_signals,
-    update_signal_outcome, get_winrate_stats, expire_old_pending_signals
+    update_signal_outcome, get_winrate_stats, expire_old_pending_signals,
+    evaluate_signal_progression
 )
 from templates.telegram_signal_template import format_scan_summary
 
@@ -549,15 +550,15 @@ async def job_signal_followup():
                     if ohlcv.empty:
                         continue
 
-                    current_price = float(ohlcv["close"].iloc[-1])
-                    intraday_high = float(ohlcv["high"].max())
-                    intraday_low = float(ohlcv["low"].min())
-                    
-                    # Fix: Ensure entry price was actually hit, especially for WATCHLIST (Buy on Weakness)
-                    entry_hit = True
-                    if signal == "WATCHLIST" and intraday_low > entry_price:
-                        entry_hit = False
-                        
+                    eval_res = evaluate_signal_progression(row, ohlcv)
+                    if not eval_res["valid"]:
+                        continue
+
+                    current_price = eval_res["current_price"]
+                    max_seen = eval_res["max_seen"]
+                    min_seen = eval_res["min_seen"]
+                    entry_hit = eval_res["entry_hit"]
+
                     if not entry_hit:
                         db_status = "PENDING"
                         tg_status = "WAITING ENTRY"
@@ -566,32 +567,28 @@ async def job_signal_followup():
                         tp2_hit = False
                         sl_hit = False
                     else:
-                        pnl_pct = ((current_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
+                        tp_hit = eval_res["tp_hit"]
+                        tp2_hit = eval_res["tp2_hit"]
+                        sl_hit = eval_res["sl_hit"]
+                        pnl_pct = eval_res["pnl_pct"]
 
-                        tp_hit = intraday_high >= tp1 if tp1 > 0 else False
-                        tp2_hit = intraday_high >= tp2 if tp2 > 0 else False  # Fix #2: cek TP2
-                        sl_hit = intraday_low <= sl_atr if sl_atr > 0 else False
-
-                        if tp2_hit and tp_hit:
+                        if tp2_hit:
                             db_status = "TP2_HIT"
                             tg_status = "TP1 + TP2 HIT 💥"
-                            pnl_pct = ((tp2 - entry_price) / entry_price) * 100
                             wins += 1
                         elif tp_hit:
                             db_status = "TP_HIT"
                             tg_status = "TP1 HIT"
-                            pnl_pct = ((tp1 - entry_price) / entry_price) * 100
                             wins += 1
                         elif sl_hit:
                             db_status = "SL_HIT"
                             tg_status = "SL HIT"
-                            pnl_pct = ((sl_atr - entry_price) / entry_price) * 100
                             losses += 1
-                        elif pnl_pct > 0:
+                        elif pnl_pct > 0.5:
                             db_status = "PROFIT"
                             tg_status = "PROFIT"
                             wins += 1
-                        elif pnl_pct < 0:
+                        elif pnl_pct < -0.5:
                             db_status = "LOSS"
                             tg_status = "LOSS"
                             losses += 1
@@ -603,12 +600,12 @@ async def job_signal_followup():
                     update_signal_outcome(
                         signal_id=signal_id,
                         status=db_status,
-                        outcome_price=current_price,
+                        outcome_price=eval_res["outcome_price"],
                         pnl_pct=pnl_pct,
                         tp_hit=tp_hit,
                         sl_hit=sl_hit,
-                        max_price=intraday_high,
-                        min_price=intraday_low,
+                        max_price=max_seen,
+                        min_price=min_seen,
                         tp2_hit=tp2_hit,
                     )
 
