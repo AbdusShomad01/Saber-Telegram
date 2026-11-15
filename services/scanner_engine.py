@@ -629,19 +629,19 @@ class ScannerEngine:
         # Sort by raw score descending
         results.sort(key=lambda x: x.raw_score, reverse=True)
 
-        # Only keep actionable bullish signals — filter out AVOID & SELL
-        # Pagi & Siang scan: HANYA WATCHLIST, BUY, STRONG BUY
-        BULLISH_SIGNALS = {"STRONG BUY", "BUY", "WATCHLIST"}
+        # Only keep actionable bullish signals — filter out AVOID & SELL & WATCHLIST
+        # Pagi & Siang scan: HANYA BUY dan STRONG BUY
+        BULLISH_SIGNALS = {"STRONG BUY", "BUY"}
         bullish_results = [r for r in results if r.signal in BULLISH_SIGNALS]
         
         if len(bullish_results) > 0:
-            logger.info(f"[scan_all] {len(bullish_results)} stocks with bullish signal after filtering AVOID/SELL.")
+            logger.info(f"[scan_all] {len(bullish_results)} stocks with actionable signal (BUY / STRONG BUY).")
             results = bullish_results
         else:
             logger.warning(
-                "[scan_all] ⚠️  ZERO bullish signals this scan! "
+                "[scan_all] ⚠️  ZERO actionable signals this scan! "
                 f"Hard filter gugur {funnel.failed_hard_filter}/{funnel.total_stocks} saham. "
-                "Tidak ada saham yang memenuhi kriteria WATCHLIST/BUY/STRONG BUY."
+                "Tidak ada saham yang memenuhi kriteria BUY/STRONG BUY."
             )
             # Return empty list — scheduler akan kirim pesan "tidak ada saham yang memenuhi kriteria"
             return []

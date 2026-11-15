@@ -306,14 +306,14 @@ async def job_daily_scan():
             thread_id = getattr(settings, "TELEGRAM_MESSAGE_THREAD_ID", None)
             thread_id = int(thread_id) if thread_id else None
 
-            # Filter: hanya kirim sinyal bullish
-            BULLISH_SIGNALS = {"STRONG BUY", "BUY", "WATCHLIST"}
+            # Filter: hanya kirim sinyal BUY dan STRONG BUY
+            BULLISH_SIGNALS = {"STRONG BUY", "BUY"}
             bullish_signals = [s for s in signals if s.signal in BULLISH_SIGNALS] if signals else []
 
             if not bullish_signals:
                 await send_telegram_with_retry(
                     bot, settings.TELEGRAM_CHAT_ID, message_thread_id=thread_id,
-                    text="🌅 <b>DAILY MARKET SCAN</b>\n\n⚠️ Tidak ada saham yang memenuhi kriteria (WATCHLIST / BUY / STRONG BUY).\nMarket sedang lemah, disarankan wait &amp; see.",
+                    text="🌅 <b>DAILY MARKET SCAN</b>\n\n⚠️ Tidak ada saham yang memenuhi kriteria (BUY / STRONG BUY).\nMarket sedang lemah, disarankan wait &amp; see.",
                 )
                 return
 
@@ -434,8 +434,8 @@ async def job_intraday_scan(interval_override: str | None = None, pure_technical
             thread_id = getattr(settings, "TELEGRAM_MESSAGE_THREAD_ID", None)
             thread_id = int(thread_id) if thread_id else None
 
-            # Filter: hanya kirim sinyal bullish (STRONG BUY, BUY, WATCHLIST)
-            BULLISH_SIGNALS = {"STRONG BUY", "BUY", "WATCHLIST"}
+            # Filter: hanya kirim sinyal BUY dan STRONG BUY
+            BULLISH_SIGNALS = {"STRONG BUY", "BUY"}
             bullish_signals = [s for s in signals if s.signal in BULLISH_SIGNALS] if signals else []
 
             if pure_technical:
@@ -448,7 +448,7 @@ async def job_intraday_scan(interval_override: str | None = None, pure_technical
             if not bullish_signals:
                 await send_telegram_with_retry(
                     bot, settings.TELEGRAM_CHAT_ID, message_thread_id=thread_id,
-                    text=f"{scan_emoji} <b>{scan_name}</b>\n\n⚠️ Tidak ada saham yang memenuhi kriteria (WATCHLIST / BUY / STRONG BUY).\nMarket sedang lemah atau konsolidasi, disarankan wait &amp; see.",
+                    text=f"{scan_emoji} <b>{scan_name}</b>\n\n⚠️ Tidak ada saham yang memenuhi kriteria (BUY / STRONG BUY).\nMarket sedang lemah atau konsolidasi, disarankan wait &amp; see.",
                 )
                 return
 
@@ -720,8 +720,8 @@ async def job_adaptive_threshold():
             avg_pnl = summary.get("avg_pnl", 0)
             profit_factor = summary.get("profit_factor", 0)
 
-            # Threshold default (diselaraskan dengan scoring_engine.py: 75 Buy, 90 Strong Buy)
-            DEFAULT_BUY_THRESHOLD = 75.0
+            # Threshold default (diselaraskan dengan scoring_engine.py: 80 Buy, 90 Strong Buy)
+            DEFAULT_BUY_THRESHOLD = 80.0
             DEFAULT_STRONG_BUY_THRESHOLD = 90.0
 
             # Hitung threshold baru berdasarkan winrate

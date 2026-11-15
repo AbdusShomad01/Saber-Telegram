@@ -188,16 +188,16 @@ class TestLiquidityFilter:
 
     def test_lolos_jika_keduanya_cukup(self, engine):
         tech = make_technical(volume_avg_5=250_000, volume_avg_20=100_000)
-        ohlcv = make_ohlcv_df(avg_value=1_500_000_000)
+        ohlcv = make_ohlcv_df(avg_value=15_000_000_000)
         result = engine._check_liquidity_filter(tech, ohlcv, timeframe="1d")
         assert result.passed is True
 
     def test_daily_uses_5d_avg_not_20d_avg(self, engine):
         """Daily wajib pakai rata-rata 5 hari (volume_avg_5 & 5 hari terakhir value), bukan 20 hari."""
-        # 15 hari awal sepi (Rp 200jt), 5 hari terakhir ramai (Rp 2M); volume_avg_20 rendah, volume_avg_5 >= 200k
+        # 15 hari awal sepi (Rp 200jt), 5 hari terakhir ramai (Rp 12M); volume_avg_20 rendah, volume_avg_5 >= 200k
         tech = make_technical(volume_avg_20=80_000, volume_avg_5=250_000)
         ohlcv = make_ohlcv_df(rows=20, avg_value=200_000_000)
-        ohlcv.iloc[-5:, ohlcv.columns.get_loc("value")] = 2_000_000_000
+        ohlcv.iloc[-5:, ohlcv.columns.get_loc("value")] = 12_000_000_000
         assert engine._check_liquidity_filter(tech, ohlcv, timeframe="1d").passed is True
 
         # Kebalikannya: 15 hari awal ramai, 5 hari terakhir sepi -> harus gugur
@@ -211,15 +211,15 @@ class TestLiquidityFilter:
     def test_gugur_jika_volume_kurang(self, engine):
         """Volume 5H < 200 ribu lembar → gugur dengan category 'volume'."""
         tech = make_technical(volume_avg_5=199_999)  # < 200 ribu
-        ohlcv = make_ohlcv_df(avg_value=5_000_000_000)  # value OK
+        ohlcv = make_ohlcv_df(avg_value=15_000_000_000)  # value OK (>= 10 miliar)
         result = engine._check_liquidity_filter(tech, ohlcv, timeframe="1d")
         assert result.passed is False
         assert result.category == "volume"
 
     def test_gugur_jika_value_kurang(self, engine):
-        """Value 5H < Rp1 miliar → gugur dengan category 'value'."""
+        """Value 5H < Rp10 miliar → gugur dengan category 'value'."""
         tech = make_technical(volume_avg_5=1_000_000)  # volume OK
-        ohlcv = make_ohlcv_df(avg_value=900_000_000)   # < 1 miliar
+        ohlcv = make_ohlcv_df(avg_value=8_000_000_000)   # < 10 miliar
         result = engine._check_liquidity_filter(tech, ohlcv, timeframe="1d")
         assert result.passed is False
         assert result.category == "value"
@@ -227,7 +227,7 @@ class TestLiquidityFilter:
     def test_gugur_jika_keduanya_kurang(self, engine):
         """Keduanya gagal → category 'volume_and_value'."""
         tech = make_technical(volume_avg_5=150_000)   # < 200 ribu
-        ohlcv = make_ohlcv_df(avg_value=800_000_000)  # < 1 miliar
+        ohlcv = make_ohlcv_df(avg_value=8_000_000_000)  # < 10 miliar
         result = engine._check_liquidity_filter(tech, ohlcv, timeframe="1d")
         assert result.passed is False
         assert result.category == "volume_and_value"
@@ -250,8 +250,8 @@ class TestLiquidityFilter:
         assert engine.MIN_AVG_VOLUME_LOT == 200_000
 
     def test_value_threshold_constant(self, engine):
-        """Pastikan threshold value daily adalah Rp 1 miliar."""
-        assert engine.MIN_AVG_VALUE_IDR == 1_000_000_000
+        """Pastikan threshold value daily adalah Rp 10 miliar."""
+        assert engine.MIN_AVG_VALUE_IDR == 10_000_000_000
 
 
 # ─────────────────────────────────────────────
@@ -365,7 +365,7 @@ class TestRunHardFilters:
     def test_all_pass(self, engine):
         tech = make_technical(adx=12.0, atr_percent=10.0, volume_avg_5=200_000)
         tech["_data_length"] = 60
-        ohlcv = make_ohlcv_df(avg_value=1_000_000_000)
+        ohlcv = make_ohlcv_df(avg_value=15_000_000_000)
         r = engine._run_hard_filters(tech, ohlcv, data_len=60, timeframe="1d")
         assert r.passed is True
 

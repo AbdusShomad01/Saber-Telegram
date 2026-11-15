@@ -64,7 +64,7 @@ def _load_adaptive_thresholds(timeframe: str) -> Dict[str, float]:
     if timeframe in _THRESHOLD_CACHE and (now - _THRESHOLD_CACHE_TS) < 3600:
         return _THRESHOLD_CACHE[timeframe]
 
-    defaults = {"buy_threshold": 75.0, "strong_buy_threshold": 90.0}
+    defaults = {"buy_threshold": 80.0, "strong_buy_threshold": 90.0}
     config_path = "./threshold_config.json"
     try:
         if os.path.exists(config_path):
@@ -73,7 +73,7 @@ def _load_adaptive_thresholds(timeframe: str) -> Dict[str, float]:
             
             tf_data = data.get(timeframe, data) # fallback to root for backwards compatibility
             loaded = {
-                "buy_threshold": float(tf_data.get("buy_threshold", 75.0)),
+                "buy_threshold": float(tf_data.get("buy_threshold", 80.0)),
                 "strong_buy_threshold": float(tf_data.get("strong_buy_threshold", 90.0)),
             }
             # Validasi range threshold yang masuk akal
@@ -543,7 +543,7 @@ class ScoringEngine:
     DAILY_LIQUIDITY_WINDOW_DAYS   = 5               # rata-rata 5 hari untuk volume & value daily
     INTRADAY_LIQUIDITY_WINDOW_BARS = 20             # window fallback jika kolom date tidak tersedia
     MIN_AVG_VOLUME_LOT            = 200_000         # 200 ribu lembar/hari (avg 5 hari) untuk daily
-    MIN_AVG_VALUE_IDR             = 1_000_000_000   # Rp 1 miliar/hari (avg 5 hari) untuk daily
+    MIN_AVG_VALUE_IDR             = 10_000_000_000  # Rp 10 miliar/hari (avg 5 hari) untuk daily
     MIN_AVG_VOLUME_LOT_INTRADAY   = 200_000         # 200 ribu lembar (~2.000 lot) total Sesi 1 untuk intraday
     MIN_SESSION1_VALUE_IDR_INTRADAY = 10_000_000_000 # Rp 10 miliar total transaksi Sesi 1 untuk intraday
     MIN_AVG_VALUE_IDR_INTRADAY    = MIN_SESSION1_VALUE_IDR_INTRADAY
@@ -1542,37 +1542,31 @@ class ScoringEngine:
     def _map_signal(score: float, timeframe: str = "1d", pure_technical: bool = False) -> str:
         """
         Map skor ke sinyal:
-        Pure Technical mode (Siang / Intraday 60m):
-        - >= 75 : STRONG BUY
-        - >= 60 : BUY
-        - >= 40 : WATCHLIST
-        - < 40  : AVOID
-
-        Standard mode (Pagi / EOD):
-        - >= strong_buy_threshold (90) : STRONG BUY
-        - >= buy_threshold (75) : BUY
-        - >= 55 : WATCHLIST
-        - < 55  : AVOID
+        Pagi dan Siang SAMA (standard & pure_technical):
+        - >= 90 : STRONG BUY
+        - >= 80 : BUY
+        - >= 60 : WATCHLIST
+        - < 60  : AVOID
         """
         if pure_technical:
-            if score >= 75.0:
+            if score >= 90.0:
                 return "STRONG BUY"
-            elif score >= 60.0:
+            elif score >= 80.0:
                 return "BUY"
-            elif score >= 40.0:
+            elif score >= 60.0:
                 return "WATCHLIST"
             else:
                 return "AVOID"
 
         thresholds = _load_adaptive_thresholds(timeframe)
         strong_buy_thresh = thresholds.get("strong_buy_threshold", 90.0)
-        buy_thresh = thresholds.get("buy_threshold", 75.0)
+        buy_thresh = thresholds.get("buy_threshold", 80.0)
 
         if score >= strong_buy_thresh:
             return "STRONG BUY"
         elif score >= buy_thresh:
             return "BUY"
-        elif score >= 55:
+        elif score >= 60.0:
             return "WATCHLIST"
         else:
             return "AVOID"
@@ -1580,19 +1574,19 @@ class ScoringEngine:
     @staticmethod
     def _map_confidence_score(score: float, pure_technical: bool = False) -> int:
         if pure_technical:
-            if score >= 80:
+            if score >= 90:
                 return 10
-            elif score >= 70:
+            elif score >= 80:
                 return 9
-            elif score >= 60:
+            elif score >= 70:
                 return 8
-            elif score >= 50:
+            elif score >= 60:
                 return 7
-            elif score >= 40:
+            elif score >= 50:
                 return 6
-            elif score >= 35:
+            elif score >= 40:
                 return 5
-            elif score >= 25:
+            elif score >= 30:
                 return 4
             elif score >= 20:
                 return 3
