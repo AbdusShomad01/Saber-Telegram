@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     # --- LLM API Keys ---
     CLAUDE_API_KEY: str = ""
     GEMINI_API_KEY: str = ""
+    GEMINI_API_KEY_BACKUP: str = ""
     LLM_PROVIDER: str = "claude"  # "claude" or "gemini"
 
     # --- TradingView Webhook ---

@@ -24,16 +24,77 @@ class LLMEngine:
     2. Strategy Agent (multimodal visual analysis + indicator cross-check + IHSG regime filter).
     """
 
+    _ACTIVE_GEMINI_KEY_INDEX: int = 0
+    _gemini_clients: Dict[str, Any] = {}
+
     def __init__(self, provider: Optional[str] = None):
         self.provider = provider or settings.LLM_PROVIDER
-        self._gemini_client = None
+
+    @classmethod
+    def get_gemini_keys(cls) -> list[str]:
+        """
+        Dapatkan daftar seluruh API key Gemini (kunci utama + kunci cadangan).
+        Mendukung pemisah koma pada GEMINI_API_KEY maupun GEMINI_API_KEY_BACKUP.
+        """
+        curr_settings = get_settings()
+        keys = []
+        primary = getattr(curr_settings, "GEMINI_API_KEY", "") or ""
+        if primary:
+            for k in primary.split(","):
+                k = k.strip()
+                if k and k not in keys:
+                    keys.append(k)
+
+        backup = getattr(curr_settings, "GEMINI_API_KEY_BACKUP", "") or ""
+        if backup:
+            for k in backup.split(","):
+                k = k.strip()
+                if k and k not in keys:
+                    keys.append(k)
+
+        return keys
+
+    @classmethod
+    def _get_gemini_client_for_key(cls, api_key: str):
+        """Get or create cached genai.Client for a given API key."""
+        if api_key not in cls._gemini_clients:
+            from google import genai
+            cls._gemini_clients[api_key] = genai.Client(api_key=api_key)
+        return cls._gemini_clients[api_key]
 
     def _get_gemini_client(self):
-        """Lazy-init Gemini client (reuse across calls)."""
-        if self._gemini_client is None:
+        """Lazy-init Gemini client untuk key aktif (backward compatibility)."""
+        keys = self.get_gemini_keys()
+        if not keys:
             from google import genai
-            self._gemini_client = genai.Client(api_key=settings.GEMINI_API_KEY)
-        return self._gemini_client
+            return genai.Client(api_key="")
+        idx = LLMEngine._ACTIVE_GEMINI_KEY_INDEX % len(keys)
+        return self._get_gemini_client_for_key(keys[idx])
+
+    @staticmethod
+    def _is_quota_or_rate_limit(exc: Exception) -> bool:
+        """Deteksi apakah error disebabkan oleh rate limit (429) atau kuota habis."""
+        msg = str(exc).lower()
+        return any(term in msg for term in [
+            "429",
+            "quota",
+            "rate limit",
+            "ratelimit",
+            "resource_exhausted",
+            "resourceexhausted",
+            "too many requests"
+        ])
+
+    @staticmethod
+    def _is_invalid_key_error(exc: Exception) -> bool:
+        """Deteksi apakah error disebabkan oleh API key yang tidak valid (400 INVALID_ARGUMENT)."""
+        msg = str(exc).lower()
+        return any(term in msg for term in [
+            "api_key_invalid",
+            "api key not valid",
+            "invalid_argument",
+            "unauthenticated"
+        ])
 
     # ------------------------------------------------------------------ #
     #  Opinion Generator (Text-only)
@@ -104,36 +165,80 @@ class LLMEngine:
             raise
 
     async def _call_gemini(self, prompt: str, model_name: str = "gemini-2.5-flash") -> str:
-        """Call Google Gemini API using new google.genai SDK."""
-        if not settings.GEMINI_API_KEY:
-            logger.warning("Gemini API key not set")
+        """
+        Call Google Gemini API using new google.genai SDK.
+        Supports automatic API key rotation / backup failover when rate limited (429 / quota exceeded).
+        """
+        keys = self.get_gemini_keys()
+        if not keys:
+            logger.warning("Gemini API key not set (neither GEMINI_API_KEY nor GEMINI_API_KEY_BACKUP)")
             return "Opini analis tidak tersedia — API key belum dikonfigurasi."
 
-        try:
-            client = self._get_gemini_client()
+        num_keys = len(keys)
+        start_idx = LLMEngine._ACTIVE_GEMINI_KEY_INDEX % num_keys
+
+        for attempt in range(num_keys):
+            curr_idx = (start_idx + attempt) % num_keys
+            api_key = keys[curr_idx]
+            key_preview = f"...{api_key[-6:]}" if len(api_key) > 6 else "***"
 
             try:
-                response = await client.aio.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                )
-                return response.text
-            except Exception as inner_e:
-                if "429" in str(inner_e) or "quota" in str(inner_e).lower():
-                    logger.warning(f"Gemini {model_name} quota exceeded. Falling back to gemini-2.0-flash.")
+                client = self._get_gemini_client_for_key(api_key)
+                try:
                     response = await client.aio.models.generate_content(
-                        model="gemini-2.0-flash",
+                        model=model_name,
                         contents=prompt,
                     )
+                    LLMEngine._ACTIVE_GEMINI_KEY_INDEX = curr_idx
                     return response.text
-                raise inner_e
+                except Exception as inner_e:
+                    if self._is_quota_or_rate_limit(inner_e):
+                        logger.warning(
+                            f"[Gemini] Key #{curr_idx + 1} ({key_preview}) terkena limit/kuota pada model {model_name} ({inner_e})."
+                        )
+                        # Jika ada key lain yang belum dicoba, rotasi ke key berikutnya
+                        if attempt < num_keys - 1:
+                            next_idx = (curr_idx + 1) % num_keys
+                            next_preview = f"...{keys[next_idx][-6:]}" if len(keys[next_idx]) > 6 else "***"
+                            logger.info(f"[Gemini] Berpindah ke backup API key #{next_idx + 1} ({next_preview})...")
+                            LLMEngine._ACTIVE_GEMINI_KEY_INDEX = next_idx
+                            continue
 
-        except ImportError:
-            logger.error("google-genai package not installed. Run: pip install google-genai")
-            return "Opini analis tidak tersedia — package google-genai belum terinstall."
-        except Exception as e:
-            logger.error(f"Gemini API error: {e}")
-            raise
+                        # Jika semua key terkena limit di gemini-2.5-flash, coba fallback ke gemini-2.0-flash di semua key
+                        logger.warning(f"[Gemini] Mencoba fallback ke model gemini-2.0-flash...")
+                        for f_idx in range(num_keys):
+                            f_key = keys[f_idx]
+                            f_client = self._get_gemini_client_for_key(f_key)
+                            try:
+                                response = await f_client.aio.models.generate_content(
+                                    model="gemini-2.0-flash",
+                                    contents=prompt,
+                                )
+                                LLMEngine._ACTIVE_GEMINI_KEY_INDEX = f_idx
+                                return response.text
+                            except Exception as fb_e:
+                                logger.warning(f"[Gemini] Fallback gemini-2.0-flash pada key #{f_idx + 1} gagal: {fb_e}")
+                        raise inner_e
+                    elif self._is_invalid_key_error(inner_e):
+                        logger.error(f"[Gemini] Key #{curr_idx + 1} ({key_preview}) tidak valid / otentikasi gagal: {inner_e}")
+                        if attempt < num_keys - 1:
+                            next_idx = (curr_idx + 1) % num_keys
+                            LLMEngine._ACTIVE_GEMINI_KEY_INDEX = next_idx
+                            continue
+                        raise inner_e
+                    else:
+                        raise inner_e
+
+            except ImportError:
+                logger.error("google-genai package not installed. Run: pip install google-genai")
+                return "Opini analis tidak tersedia — package google-genai belum terinstall."
+            except Exception as e:
+                if attempt < num_keys - 1 and (self._is_quota_or_rate_limit(e) or self._is_invalid_key_error(e)):
+                    continue
+                logger.error(f"Gemini API error: {e}")
+                raise
+
+        return self._fallback_opinion(ticker="", signal="", confidence=5)
 
     def _fallback_opinion(self, ticker: str, signal: str, confidence: int) -> str:
         """Fallback opinion when LLM is unavailable."""
@@ -200,7 +305,7 @@ class LLMEngine:
         try:
             if self.provider == "claude" and settings.CLAUDE_API_KEY:
                 raw_response = await self._call_claude_vision(prompt, image_path)
-            elif self.provider == "gemini" and settings.GEMINI_API_KEY:
+            elif self.provider == "gemini" and self.get_gemini_keys():
                 raw_response = await self._call_gemini_vision(prompt, image_path, model_name="gemini-2.5-flash")
             else:
                 logger.warning("No valid LLM credentials found for Strategy Agent. Falling back to rules.")
@@ -218,11 +323,17 @@ class LLMEngine:
             return {}
 
     async def _call_gemini_vision(self, prompt: str, image_path: str, model_name: str = "gemini-2.5-flash") -> str:
-        """Call Google Gemini Vision API using new google.genai SDK."""
+        """
+        Call Google Gemini Vision API using new google.genai SDK.
+        Supports automatic API key rotation / backup failover when rate limited (429 / quota exceeded).
+        """
+        keys = self.get_gemini_keys()
+        if not keys:
+            logger.warning("Gemini API key not set (neither GEMINI_API_KEY nor GEMINI_API_KEY_BACKUP)")
+            return ""
+
         try:
             from google.genai import types
-
-            client = self._get_gemini_client()
 
             # Read image bytes
             with open(image_path, "rb") as f:
@@ -230,28 +341,73 @@ class LLMEngine:
 
             # Determine MIME type
             mime_type = "image/png" if image_path.lower().endswith(".png") else "image/jpeg"
-
             image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
 
-            try:
-                response = await client.aio.models.generate_content(
-                    model=model_name,
-                    contents=[image_part, prompt],
-                )
-                return response.text
-            except Exception as inner_e:
-                if "429" in str(inner_e) or "quota" in str(inner_e).lower():
-                    logger.warning(f"Gemini Vision {model_name} quota exceeded. Falling back to gemini-2.0-flash.")
-                    response = await client.aio.models.generate_content(
-                        model="gemini-2.0-flash",
-                        contents=[image_part, prompt],
-                    )
-                    return response.text
-                raise inner_e
+            num_keys = len(keys)
+            start_idx = LLMEngine._ACTIVE_GEMINI_KEY_INDEX % num_keys
+
+            for attempt in range(num_keys):
+                curr_idx = (start_idx + attempt) % num_keys
+                api_key = keys[curr_idx]
+                key_preview = f"...{api_key[-6:]}" if len(api_key) > 6 else "***"
+
+                try:
+                    client = self._get_gemini_client_for_key(api_key)
+                    try:
+                        response = await client.aio.models.generate_content(
+                            model=model_name,
+                            contents=[image_part, prompt],
+                        )
+                        LLMEngine._ACTIVE_GEMINI_KEY_INDEX = curr_idx
+                        return response.text
+                    except Exception as inner_e:
+                        if self._is_quota_or_rate_limit(inner_e):
+                            logger.warning(
+                                f"[Gemini Vision] Key #{curr_idx + 1} ({key_preview}) terkena limit/kuota pada model {model_name} ({inner_e})."
+                            )
+                            if attempt < num_keys - 1:
+                                next_idx = (curr_idx + 1) % num_keys
+                                next_preview = f"...{keys[next_idx][-6:]}" if len(keys[next_idx]) > 6 else "***"
+                                logger.info(f"[Gemini Vision] Berpindah ke backup API key #{next_idx + 1} ({next_preview})...")
+                                LLMEngine._ACTIVE_GEMINI_KEY_INDEX = next_idx
+                                continue
+
+                            # Coba fallback model gemini-2.0-flash di semua key
+                            logger.warning(f"[Gemini Vision] Mencoba fallback ke model gemini-2.0-flash...")
+                            for f_idx in range(num_keys):
+                                f_key = keys[f_idx]
+                                f_client = self._get_gemini_client_for_key(f_key)
+                                try:
+                                    response = await f_client.aio.models.generate_content(
+                                        model="gemini-2.0-flash",
+                                        contents=[image_part, prompt],
+                                    )
+                                    LLMEngine._ACTIVE_GEMINI_KEY_INDEX = f_idx
+                                    return response.text
+                                except Exception as fb_e:
+                                    logger.warning(f"[Gemini Vision] Fallback gemini-2.0-flash pada key #{f_idx + 1} gagal: {fb_e}")
+                            raise inner_e
+                        elif self._is_invalid_key_error(inner_e):
+                            logger.error(f"[Gemini Vision] Key #{curr_idx + 1} ({key_preview}) tidak valid / otentikasi gagal: {inner_e}")
+                            if attempt < num_keys - 1:
+                                next_idx = (curr_idx + 1) % num_keys
+                                LLMEngine._ACTIVE_GEMINI_KEY_INDEX = next_idx
+                                continue
+                            raise inner_e
+                        else:
+                            raise inner_e
+
+                except Exception as e:
+                    if attempt < num_keys - 1 and (self._is_quota_or_rate_limit(e) or self._is_invalid_key_error(e)):
+                        continue
+                    logger.error(f"Gemini Vision API error on key #{curr_idx + 1} ({key_preview}): {e}")
+                    raise
 
         except Exception as e:
             logger.error(f"Gemini Vision API error: {e}")
             raise
+
+        return ""
 
     async def _call_claude_vision(self, prompt: str, image_path: str) -> str:
         """Call Anthropic Claude API with image context."""
