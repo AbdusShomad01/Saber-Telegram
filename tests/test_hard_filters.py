@@ -217,9 +217,9 @@ class TestLiquidityFilter:
         assert result.category == "volume"
 
     def test_gugur_jika_value_kurang(self, engine):
-        """Value 5H < Rp10 miliar → gugur dengan category 'value'."""
+        """Value 5H < Rp5 miliar → gugur dengan category 'value'."""
         tech = make_technical(volume_avg_5=1_000_000)  # volume OK
-        ohlcv = make_ohlcv_df(avg_value=8_000_000_000)   # < 10 miliar
+        ohlcv = make_ohlcv_df(avg_value=4_000_000_000)   # < 5 miliar
         result = engine._check_liquidity_filter(tech, ohlcv, timeframe="1d")
         assert result.passed is False
         assert result.category == "value"
@@ -227,7 +227,7 @@ class TestLiquidityFilter:
     def test_gugur_jika_keduanya_kurang(self, engine):
         """Keduanya gagal → category 'volume_and_value'."""
         tech = make_technical(volume_avg_5=150_000)   # < 200 ribu
-        ohlcv = make_ohlcv_df(avg_value=8_000_000_000)  # < 10 miliar
+        ohlcv = make_ohlcv_df(avg_value=4_000_000_000)  # < 5 miliar
         result = engine._check_liquidity_filter(tech, ohlcv, timeframe="1d")
         assert result.passed is False
         assert result.category == "volume_and_value"
@@ -250,8 +250,8 @@ class TestLiquidityFilter:
         assert engine.MIN_AVG_VOLUME_LOT == 200_000
 
     def test_value_threshold_constant(self, engine):
-        """Pastikan threshold value daily adalah Rp 10 miliar."""
-        assert engine.MIN_AVG_VALUE_IDR == 10_000_000_000
+        """Pastikan threshold value daily adalah Rp 5 miliar."""
+        assert engine.MIN_AVG_VALUE_IDR == 5_000_000_000
 
 
 # ─────────────────────────────────────────────

@@ -720,8 +720,8 @@ async def job_adaptive_threshold():
             avg_pnl = summary.get("avg_pnl", 0)
             profit_factor = summary.get("profit_factor", 0)
 
-            # Threshold default (diselaraskan dengan scoring_engine.py: 80 Buy, 90 Strong Buy)
-            DEFAULT_BUY_THRESHOLD = 80.0
+            # Threshold default (diselaraskan dengan scoring_engine.py: 75 Buy, 90 Strong Buy)
+            DEFAULT_BUY_THRESHOLD = 75.0
             DEFAULT_STRONG_BUY_THRESHOLD = 90.0
 
             # Hitung threshold baru berdasarkan winrate
