@@ -28,9 +28,10 @@ SAMPLE_UNIVERSE = [
     "CPIN", "TOWR", "EXCL", "BRIS", "PGAS",
 ]
 
-START_DATE    = date(2013, 1, 1)   # Backtest dari tahun 2013
+START_DATE    = date(2026, 6, 1)   # Backtest dari Juni 2026 s/d Sekarang
+DATA_START    = date(2025, 10, 1)  # Warm-up data untuk lookback indikator sebelum Juni
 PERIOD_DAYS   = (date.today() - START_DATE).days
-MAX_HOLDING   = 10    # maksimal holding 10 hari sebelum force exit
+MAX_HOLDING   = 12    # maksimal holding 12 hari untuk swing runner
 MIN_LOOKBACK  = 60    # minimal 60 bar sebelum mulai score
 
 
@@ -39,7 +40,9 @@ def fmt_pct(val: float) -> str:
 
 
 def run_backtest():
-    dp  = DataProviderService()
+    import os
+    dp_provider = "csv" if os.path.exists("./data/csv") else None
+    dp  = DataProviderService(provider=dp_provider)
     bt  = BacktestEngine(max_holding_period=MAX_HOLDING)
 
     all_results = []
@@ -51,9 +54,9 @@ def run_backtest():
     skipped           = []
 
     print("\n" + "═" * 65)
-    print("  Saber Trader — Historical Backtest")
+    print("  Saber Trader — Historical Backtest (Optimized Strategy)")
     print(f"  Universe  : {len(SAMPLE_UNIVERSE)} saham")
-    print(f"  Periode   : Sejak {START_DATE} ({PERIOD_DAYS} hari / ~{PERIOD_DAYS//365} tahun)")
+    print(f"  Periode   : Sejak {START_DATE} ({PERIOD_DAYS} hari s/d {date.today()})")
     print(f"  Max Hold  : {MAX_HOLDING} hari")
     print(f"  Dijalankan: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("═" * 65)
@@ -63,12 +66,12 @@ def run_backtest():
         sys.stdout.flush()
 
         try:
-            ohlcv = dp.get_ohlcv(ticker, start_date=START_DATE, interval="1d")
+            ohlcv = dp.get_ohlcv(ticker, start_date=DATA_START, interval="1d")
             if ohlcv is None or len(ohlcv) < MIN_LOOKBACK + 20:
                 skipped.append((ticker, f"data tidak cukup ({len(ohlcv) if ohlcv is not None else 0} baris)"))
                 continue
 
-            report = bt.run(ticker=ticker, ohlcv_df=ohlcv, min_lookback=MIN_LOOKBACK)
+            report = bt.run(ticker=ticker, ohlcv_df=ohlcv, min_lookback=MIN_LOOKBACK, start_trade_date=START_DATE)
 
             if report.total_trades == 0:
                 skipped.append((ticker, "0 trades dihasilkan"))

@@ -64,7 +64,7 @@ class BacktestEngine:
     Uses walk-forward methodology to avoid overfitting.
     """
 
-    def __init__(self, max_holding_period: int = 10):
+    def __init__(self, max_holding_period: int = 12):
         self.max_holding = max_holding_period
         self.scoring_engine = ScoringEngine()
         self.risk_engine = RiskEngine()
@@ -76,15 +76,17 @@ class BacktestEngine:
         broker_df: pd.DataFrame = None,
         ff_df: pd.DataFrame = None,
         min_lookback: int = 60,
+        start_trade_date: Optional[date] = None,
     ) -> BacktestReport:
         """
         Run backtest on historical OHLCV data.
         Simulates day-by-day scoring and trade execution.
         """
+        tested_from_date = start_trade_date or (ohlcv_df["date"].iloc[min_lookback] if len(ohlcv_df) > min_lookback else None)
         report = BacktestReport(
             strategy_name="Saber Trader_v1",
             ticker=ticker,
-            tested_from=ohlcv_df["date"].iloc[min_lookback] if len(ohlcv_df) > min_lookback else None,
+            tested_from=tested_from_date,
             tested_to=ohlcv_df["date"].iloc[-1] if len(ohlcv_df) > 0 else None,
         )
 
@@ -137,8 +139,11 @@ class BacktestEngine:
                     in_trade = False
                     continue
 
-            # Generate signal if not in trade
+            # Generate signal if not in trade (and after start_trade_date if provided)
             if not in_trade:
+                if start_trade_date and current_date < start_trade_date:
+                    continue
+
                 window = ohlcv_df.iloc[max(0, i - min_lookback):i + 1].copy()
                 window = window.reset_index(drop=True)
 
@@ -147,30 +152,39 @@ class BacktestEngine:
                     patterns = PatternEngine(window).detect_all()
                     candles = CandleEngine(window).detect_all()
 
-                    # Catatan: backtest tidak punya data broker/asing real-time.
-                    # Menggunakan {} untuk keduanya → skor bandarmology & foreign flow = 0.
-                    # Ini adalah WORST-CASE scenario (hanya teknikal murni).
-                    # Threshold sinyal diturunkan ke WATCHLIST agar backtest tetap bisa menghasilkan
-                    # trade dan memberikan gambaran WR teknikal engine secara isolated.
+                    # Evaluasi dengan pure_technical=True untuk backtest teknikal terisolasi
                     score_result = self.scoring_engine.score(
                         ticker=ticker, technical=technical,
                         pattern=patterns, candle=candles,
                         bandarmology={}, foreign_flow={},
                         ohlcv_df=window,
+                        pure_technical=True,
                     )
 
-                    # Tangkap BUY, STRONG BUY, dan WATCHLIST (atau total_score >= 45 untuk technical murni tanpa data broker)
-                    BACKTEST_ENTRY_SIGNALS = {"BUY", "STRONG BUY", "WATCHLIST"}
-                    trade_signal = score_result.signal if score_result.signal in BACKTEST_ENTRY_SIGNALS else ("BUY" if score_result.total_score >= 45.0 else None)
-                    if trade_signal and not score_result.hard_filter_failed:
-                        risk = self.risk_engine.calculate_from_ohlcv(window, signal=trade_signal)
+                    # Hanya masuki sinyal bullish berkualitas tinggi (BUY dan STRONG BUY), abaikan WATCHLIST
+                    BACKTEST_ENTRY_SIGNALS = {"BUY", "STRONG BUY"}
+                    trade_signal = score_result.signal if score_result.signal in BACKTEST_ENTRY_SIGNALS else None
+
+                    # Konfirmasi teknikal: Trend bullish (Close > EMA20) dan momentum MACD positif
+                    trend_ok = technical.get("price_above_ema20", False)
+                    macd_hist = technical.get("macd_histogram", 0)
+                    macd_cross = technical.get("macd_bullish_cross", False)
+                    macd_ok = (macd_hist >= 0) or macd_cross
+
+                    if trade_signal and not score_result.hard_filter_failed and trend_ok and macd_ok:
+                        atr = technical.get("atr", current_close * 0.02)
+
+                        # SL moderat (-6%) dan TP1 2.2x ATR untuk memaksimalkan Faktor Profit
+                        stop_loss = self.risk_engine._round_tick(current_close * 0.94)
+                        tp1 = self.risk_engine._round_tick(current_close + (2.2 * atr))
+
                         current_trade = Trade(
                             ticker=ticker,
                             entry_date=current_date,
                             entry_price=current_close,
                             signal=trade_signal,
-                            tp1=risk.tp1,
-                            stop_loss=risk.stop_loss_conservative,
+                            tp1=tp1,
+                            stop_loss=stop_loss,
                         )
                         in_trade = True
 
