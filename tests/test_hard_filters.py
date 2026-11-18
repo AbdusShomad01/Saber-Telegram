@@ -482,30 +482,30 @@ class TestIntradayTightenedFilters:
         assert r.passed is False
         assert r.category == "volume"
 
-    def test_intraday_session1_value_must_reach_10b(self, engine):
-        """Total nilai transaksi Sesi 1 < Rp 10 Miliar gugur (meski Sesi 2 ramai), >= Rp 10 Miliar lolos."""
+    def test_intraday_session1_value_must_reach_5b(self, engine):
+        """Total nilai transaksi Sesi 1 < Rp 5 Miliar gugur (meski Sesi 2 ramai), >= Rp 5 Miliar lolos."""
         tech = make_technical(volume_avg_20=500_000)
         s1_dates = pd.date_range("2026-11-12 09:00", periods=10, freq="15min")
         s2_dates = pd.date_range("2026-11-12 13:30", periods=6, freq="15min")
         all_dates = s1_dates.append(s2_dates)
 
-        # Sesi 1 total = 10 * 800 juta = Rp 8 Miliar (< 10B), Sesi 2 total = Rp 60 Miliar -> tetap GUGUR
+        # Sesi 1 total = 10 * 400 juta = Rp 4 Miliar (< 5B), Sesi 2 total = Rp 60 Miliar -> tetap GUGUR
         ohlcv_low_s1 = pd.DataFrame({
             "date": all_dates,
             "close": [1000.0] * len(all_dates),
             "volume": [500_000] * len(all_dates),
-            "value": [800_000_000] * len(s1_dates) + [10_000_000_000] * len(s2_dates),
+            "value": [400_000_000] * len(s1_dates) + [10_000_000_000] * len(s2_dates),
         })
         r_fail = engine._check_liquidity_filter(tech, ohlcv_low_s1, timeframe="15m")
         assert r_fail.passed is False
         assert r_fail.category == "value"
 
-        # Sesi 1 total = 10 * 1.1 Miliar = Rp 11 Miliar (>= 10B, meski per-bar < Rp 2 Miliar) -> LOLOS
+        # Sesi 1 total = 10 * 600 juta = Rp 6 Miliar (>= 5B) -> LOLOS
         ohlcv_ok_s1 = pd.DataFrame({
             "date": s1_dates,
             "close": [1000.0] * len(s1_dates),
             "volume": [100_000] * len(s1_dates),
-            "value": [1_100_000_000] * len(s1_dates),
+            "value": [600_000_000] * len(s1_dates),
         })
         r_pass = engine._check_liquidity_filter(tech, ohlcv_ok_s1, timeframe="15m")
         assert r_pass.passed is True

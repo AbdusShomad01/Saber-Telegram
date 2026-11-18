@@ -64,7 +64,7 @@ def _load_adaptive_thresholds(timeframe: str) -> Dict[str, float]:
     if timeframe in _THRESHOLD_CACHE and (now - _THRESHOLD_CACHE_TS) < 3600:
         return _THRESHOLD_CACHE[timeframe]
 
-    defaults = {"buy_threshold": 75.0, "strong_buy_threshold": 90.0}
+    defaults = {"buy_threshold": 70.0, "strong_buy_threshold": 85.0}
     config_path = "./threshold_config.json"
     try:
         if os.path.exists(config_path):
@@ -73,11 +73,11 @@ def _load_adaptive_thresholds(timeframe: str) -> Dict[str, float]:
             
             tf_data = data.get(timeframe, data) # fallback to root for backwards compatibility
             loaded = {
-                "buy_threshold": float(tf_data.get("buy_threshold", 75.0)),
-                "strong_buy_threshold": float(tf_data.get("strong_buy_threshold", 90.0)),
+                "buy_threshold": float(tf_data.get("buy_threshold", 70.0)),
+                "strong_buy_threshold": float(tf_data.get("strong_buy_threshold", 85.0)),
             }
             # Validasi range threshold yang masuk akal
-            if 65 <= loaded["buy_threshold"] <= 85 and 85 <= loaded["strong_buy_threshold"] <= 95:
+            if 60 <= loaded["buy_threshold"] <= 85 and 80 <= loaded["strong_buy_threshold"] <= 95:
                 _THRESHOLD_CACHE[timeframe] = loaded
                 _THRESHOLD_CACHE_TS = now
                 logger.debug(f"[ScoringEngine] Adaptive thresholds loaded for {timeframe}: BUY={loaded['buy_threshold']}, STRONG_BUY={loaded['strong_buy_threshold']}")
@@ -545,7 +545,7 @@ class ScoringEngine:
     MIN_AVG_VOLUME_LOT            = 200_000         # 200 ribu lembar/hari (avg 5 hari) untuk daily
     MIN_AVG_VALUE_IDR             = 5_000_000_000   # Rp 5 miliar/hari (avg 5 hari) untuk daily
     MIN_AVG_VOLUME_LOT_INTRADAY   = 200_000         # 200 ribu lembar (~2.000 lot) total Sesi 1 untuk intraday
-    MIN_SESSION1_VALUE_IDR_INTRADAY = 10_000_000_000 # Rp 10 miliar total transaksi Sesi 1 untuk intraday
+    MIN_SESSION1_VALUE_IDR_INTRADAY = 5_000_000_000  # Rp 5 miliar total transaksi Sesi 1 untuk intraday (diselaraskan)
     MIN_AVG_VALUE_IDR_INTRADAY    = MIN_SESSION1_VALUE_IDR_INTRADAY
     MAX_ATR_PCT                   = 10.0            # % untuk daily (pagi hari)
     MAX_ATR_PCT_INTRADAY          = 7.0             # % untuk intraday
@@ -1543,36 +1543,36 @@ class ScoringEngine:
         """
         Map skor ke sinyal:
         - Siang (pure_technical):
-          * >= 90 : STRONG BUY
-          * >= 80 : BUY
-          * >= 60 : WATCHLIST
-          * < 60  : AVOID
+          * >= 85 : STRONG BUY
+          * >= 70 : BUY
+          * >= 55 : WATCHLIST
+          * < 55  : AVOID
 
         - Pagi (standard):
-          * >= 90 : STRONG BUY
-          * >= 75 : BUY
-          * >= 60 : WATCHLIST
-          * < 60  : AVOID
+          * >= 85 : STRONG BUY
+          * >= 70 : BUY
+          * >= 55 : WATCHLIST
+          * < 55  : AVOID
         """
         if pure_technical:
-            if score >= 90.0:
+            if score >= 85.0:
                 return "STRONG BUY"
-            elif score >= 80.0:
+            elif score >= 70.0:
                 return "BUY"
-            elif score >= 60.0:
+            elif score >= 55.0:
                 return "WATCHLIST"
             else:
                 return "AVOID"
 
         thresholds = _load_adaptive_thresholds(timeframe)
-        strong_buy_thresh = thresholds.get("strong_buy_threshold", 90.0)
-        buy_thresh = thresholds.get("buy_threshold", 75.0)
+        strong_buy_thresh = thresholds.get("strong_buy_threshold", 85.0)
+        buy_thresh = thresholds.get("buy_threshold", 70.0)
 
         if score >= strong_buy_thresh:
             return "STRONG BUY"
         elif score >= buy_thresh:
             return "BUY"
-        elif score >= 60.0:
+        elif score >= 55.0:
             return "WATCHLIST"
         else:
             return "AVOID"
@@ -1580,9 +1580,9 @@ class ScoringEngine:
     @staticmethod
     def _map_confidence_score(score: float, pure_technical: bool = False) -> int:
         if pure_technical:
-            if score >= 90:
+            if score >= 85:
                 return 10
-            elif score >= 80:
+            elif score >= 75:
                 return 9
             elif score >= 70:
                 return 8
@@ -1601,13 +1601,13 @@ class ScoringEngine:
             else:
                 return 1
 
-        if score >= 90:
+        if score >= 85:
             return 10
-        elif score >= 80:
+        elif score >= 78:
             return 9
         elif score >= 70:
             return 8
-        elif score >= 65:
+        elif score >= 62:
             return 7
         elif score >= 55:
             return 6

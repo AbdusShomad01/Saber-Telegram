@@ -559,7 +559,7 @@ class ScannerEngine:
     # ------------------------------------------------------------------ #
     #  Parallel Full Scan
     # ------------------------------------------------------------------ #
-    async def scan_all(self, top_n: Optional[int] = None, override_interval: Optional[str] = None, pure_technical: bool = False) -> List[SignalOutput]:
+    async def scan_all(self, top_n: Optional[int] = 7, override_interval: Optional[str] = None, pure_technical: bool = False) -> List[SignalOutput]:
         """Scan all stocks in the universe with parallel data fetching.
         
         - In pure_technical mode: Only technical indicators are evaluated (Noon screener).
@@ -626,34 +626,50 @@ class ScannerEngine:
             funnel.total_stocks += phase1_susp
         logger.info(funnel.to_summary_text())
 
-        # Sort by raw score descending
-        results.sort(key=lambda x: x.raw_score, reverse=True)
+        # Sort by raw score and risk-reward ratio descending
+        results.sort(key=lambda x: (x.raw_score, getattr(x, "risk_reward_ratio", 0)), reverse=True)
 
         # Only keep actionable bullish signals — filter out AVOID & SELL & WATCHLIST
-        # Pagi & Siang scan: HANYA BUY dan STRONG BUY
+        # Pagi & Siang scan: HANYA BUY dan STRONG BUY dengan Positive Profit Factor / Expectancy (R:R >= 1.5)
         BULLISH_SIGNALS = {"STRONG BUY", "BUY"}
-        bullish_results = [r for r in results if r.signal in BULLISH_SIGNALS]
-        
-        if len(bullish_results) > 0:
-            logger.info(f"[scan_all] {len(bullish_results)} stocks with actionable signal (BUY / STRONG BUY).")
-            results = bullish_results
-        else:
-            logger.warning(
-                "[scan_all] ⚠️  ZERO actionable signals this scan! "
-                f"Hard filter gugur {funnel.failed_hard_filter}/{funnel.total_stocks} saham. "
-                "Tidak ada saham yang memenuhi kriteria BUY/STRONG BUY."
-            )
-            # Return empty list — scheduler akan kirim pesan "tidak ada saham yang memenuhi kriteria"
-            return []
+        MIN_RR_RATIO = 1.5
+        actionable_results = [
+            r for r in results
+            if r.signal in BULLISH_SIGNALS and getattr(r, "risk_reward_ratio", 0) >= MIN_RR_RATIO
+        ]
+        # Fallback jika pasar konsolidasi ketat dan kandidat < 3: longgarkan R:R ke 1.3
+        if len(actionable_results) < 3:
+            more_results = [
+                r for r in results
+                if r.signal in BULLISH_SIGNALS and getattr(r, "risk_reward_ratio", 0) >= 1.3 and r not in actionable_results
+            ]
+            actionable_results.extend(more_results)
 
-        # Hapus batasan kuota Top 10 dan maksimal 3 per sektor:
-        # Seluruh kandidat bullish hasil scoring Fase 2 diteruskan ke Fase 3 (LLM Strategy Agent)
+        if actionable_results:
+            logger.info(f"[scan_all] {len(actionable_results)} stocks with actionable signal (BUY / STRONG BUY & Positive Expectancy).")
+            results = actionable_results
+        else:
+            # Fallback jika tidak ada yang R:R >= 1.3 tapi ada sinyal bullish
+            bullish_results = [r for r in results if r.signal in BULLISH_SIGNALS]
+            if bullish_results:
+                logger.info(f"[scan_all] {len(bullish_results)} stocks with actionable signal (fallback R:R).")
+                results = bullish_results
+            else:
+                logger.warning(
+                    "[scan_all] ⚠️  ZERO actionable signals this scan! "
+                    f"Hard filter gugur {funnel.failed_hard_filter}/{funnel.total_stocks} saham. "
+                    "Tidak ada saham yang memenuhi kriteria BUY/STRONG BUY."
+                )
+                # Return empty list — scheduler akan kirim pesan "tidak ada saham yang memenuhi kriteria"
+                return []
+
+        # Kurasi Top kandidat untuk Fase 3 (LLM Strategy Agent)
         if top_n is not None:
             top_candidates = results[:top_n]
             logger.info(f"[scan_all] Phase 2 complete. Taking top {len(top_candidates)} as LLM candidates (top_n={top_n}).")
         else:
             top_candidates = results
-            logger.info(f"[scan_all] Phase 2 complete. Taking all {len(top_candidates)} bullish stocks as LLM candidates (unlimited quota, no sector limit).")
+            logger.info(f"[scan_all] Phase 2 complete. Taking all {len(top_candidates)} bullish stocks as LLM candidates.")
 
         # ========== PHASE 3: LLM analysis (parallel with semaphore) ==========
         sem = asyncio.Semaphore(2)  # Max 2 concurrent LLM requests to respect Gemini 15 RPM limit
@@ -689,9 +705,9 @@ class ScannerEngine:
         tasks = [process_cand(cand) for cand in top_candidates]
         all_results = await asyncio.gather(*tasks)
 
-        # Filter out any Nones, sort by score again, trim to top_n
+        # Filter out any Nones, sort by score and risk-reward ratio again, trim to top_n
         final_signals = [s for s in all_results if s is not None]
-        final_signals.sort(key=lambda x: x.raw_score, reverse=True)
+        final_signals.sort(key=lambda x: (x.raw_score, getattr(x, "risk_reward_ratio", 0)), reverse=True)
 
         # Deduplication by ticker: pastikan setiap saham hanya muncul sekali
         seen_tickers = set()

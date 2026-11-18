@@ -293,7 +293,7 @@ async def job_daily_scan():
 
     try:
         scanner = ScannerEngine()
-        signals = await scanner.scan_all()  # Unlimited quota: kirim semua sinyal bullish yang lolos
+        signals = await scanner.scan_all(top_n=7)  # Top 5-7 kandidat terbaik dengan R:R positif
 
         from app.config import get_settings
         settings = get_settings()
@@ -306,18 +306,18 @@ async def job_daily_scan():
             thread_id = getattr(settings, "TELEGRAM_MESSAGE_THREAD_ID", None)
             thread_id = int(thread_id) if thread_id else None
 
-            # Filter: hanya kirim sinyal BUY dan STRONG BUY
+            # Filter: hanya kirim sinyal BUY dan STRONG BUY (Top 5-7 dengan R:R Positif)
             BULLISH_SIGNALS = {"STRONG BUY", "BUY"}
-            bullish_signals = [s for s in signals if s.signal in BULLISH_SIGNALS] if signals else []
+            bullish_signals = [s for s in signals if s.signal in BULLISH_SIGNALS][:7] if signals else []
 
             if not bullish_signals:
                 await send_telegram_with_retry(
                     bot, settings.TELEGRAM_CHAT_ID, message_thread_id=thread_id,
-                    text="🌅 <b>DAILY MARKET SCAN</b>\n\n⚠️ Tidak ada saham yang memenuhi kriteria (BUY / STRONG BUY).\nMarket sedang lemah, disarankan wait &amp; see.",
+                    text="🌅 <b>DAILY MARKET SCAN</b>\n\n⚠️ Tidak ada saham yang memenuhi kriteria (BUY / STRONG BUY & R:R Positif).\nMarket sedang lemah, disarankan wait &amp; see.",
                 )
                 return
 
-            header_msg = f"🌅 <b>DAILY MARKET SCAN COMPLETED</b>\nBerikut adalah {len(bullish_signals)} sinyal bullish terbaik hari ini:"
+            header_msg = f"🌅 <b>DAILY MARKET SCAN (Top {len(bullish_signals)} Kurasi Terbaik — R:R Positif)</b>\nBerikut adalah sinyal bullish pilihan terbaik dengan potensi profit optimal:"
             await send_telegram_with_retry(bot, settings.TELEGRAM_CHAT_ID, text=header_msg, message_thread_id=thread_id)
 
             from templates.telegram_signal_template import format_signal_message
@@ -424,7 +424,7 @@ async def job_intraday_scan(interval_override: str | None = None, pure_technical
 
     try:
         scanner = ScannerEngine()
-        signals = await scanner.scan_all(override_interval=interval_override, pure_technical=pure_technical)  # Unlimited quota
+        signals = await scanner.scan_all(top_n=7, override_interval=interval_override, pure_technical=pure_technical)  # Top 5-7 kandidat terbaik dengan R:R positif
 
         if settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID:
             import os
@@ -434,9 +434,9 @@ async def job_intraday_scan(interval_override: str | None = None, pure_technical
             thread_id = getattr(settings, "TELEGRAM_MESSAGE_THREAD_ID", None)
             thread_id = int(thread_id) if thread_id else None
 
-            # Filter: hanya kirim sinyal BUY dan STRONG BUY
+            # Filter: hanya kirim sinyal BUY dan STRONG BUY (Top 5-7 dengan R:R Positif)
             BULLISH_SIGNALS = {"STRONG BUY", "BUY"}
-            bullish_signals = [s for s in signals if s.signal in BULLISH_SIGNALS] if signals else []
+            bullish_signals = [s for s in signals if s.signal in BULLISH_SIGNALS][:7] if signals else []
 
             if pure_technical:
                 scan_name = f"NOON INTRADAY SCAN ({interval_used} — PURE TEKNIKAL)"
@@ -448,11 +448,11 @@ async def job_intraday_scan(interval_override: str | None = None, pure_technical
             if not bullish_signals:
                 await send_telegram_with_retry(
                     bot, settings.TELEGRAM_CHAT_ID, message_thread_id=thread_id,
-                    text=f"{scan_emoji} <b>{scan_name}</b>\n\n⚠️ Tidak ada saham yang memenuhi kriteria (BUY / STRONG BUY).\nMarket sedang lemah atau konsolidasi, disarankan wait &amp; see.",
+                    text=f"{scan_emoji} <b>{scan_name}</b>\n\n⚠️ Tidak ada saham yang memenuhi kriteria (BUY / STRONG BUY & R:R Positif).\nMarket sedang lemah atau konsolidasi, disarankan wait &amp; see.",
                 )
                 return
 
-            header_msg = f"{scan_emoji} <b>{scan_name}</b>\nBerikut adalah <b>{len(bullish_signals)} sinyal bullish</b> terbaik:"
+            header_msg = f"{scan_emoji} <b>{scan_name} (Top {len(bullish_signals)} Kurasi Terbaik — R:R Positif)</b>\nBerikut adalah sinyal bullish pilihan terbaik dengan potensi profit optimal:"
             await send_telegram_with_retry(bot, settings.TELEGRAM_CHAT_ID, text=header_msg, message_thread_id=thread_id)
 
             from templates.telegram_signal_template import format_signal_message
@@ -720,9 +720,9 @@ async def job_adaptive_threshold():
             avg_pnl = summary.get("avg_pnl", 0)
             profit_factor = summary.get("profit_factor", 0)
 
-            # Threshold default (diselaraskan dengan scoring_engine.py: 75 Buy, 90 Strong Buy)
-            DEFAULT_BUY_THRESHOLD = 75.0
-            DEFAULT_STRONG_BUY_THRESHOLD = 90.0
+            # Threshold default (diselaraskan dengan scoring_engine.py: 70 Buy, 85 Strong Buy)
+            DEFAULT_BUY_THRESHOLD = 70.0
+            DEFAULT_STRONG_BUY_THRESHOLD = 85.0
 
             # Hitung threshold baru berdasarkan winrate
             if resolved < 10:
